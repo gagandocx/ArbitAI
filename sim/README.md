@@ -31,13 +31,25 @@ actually exist on them.
 Differences from the original, all in the bot's favour: all routes are quoted in one pass per block, there are
 no competing bots, and gas is estimated from a model rather than the deployed contract.
 
-## 2. Simple live check (two-step routes, several loan sizes)
+## 2. Base: many tokens, Uniswap V3 vs Aerodrome
+
+```sh
+node sim/base_live_check.mjs --minutes 60
+```
+
+This checks real round trips (borrow USDC or WETH → buy a token on one exchange → sell it on another) for WETH, USDC,
+USDbC, DAI, USDT, cbETH, wstETH, cbBTC, AERO, DEGEN, BRETT and VIRTUAL. It compares every Uniswap V3 fee level with
+Aerodrome's volatile and stable pools, at $1k and $10k (`--sizes`), and subtracts the live Aave fee and gas. Each
+token's name is checked on-chain at startup, and any mismatch is skipped. Options: `--every 12` (seconds between
+checks) and `--min-profit-bps 50`.
+
+## 3. Simple live check on Ethereum (two-step routes, several loan sizes)
 
 ```sh
 node sim/live_mainnet_check.mjs --minutes 360
 ```
 
-## 3. Offline market simulation (no internet)
+## 4. Offline market simulation (no internet)
 
 ```sh
 node sim/realistic_market_sim.js --days 30 --seeds 5

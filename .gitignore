@@ -4,3 +4,4 @@ node_modules/
 .DS_Store
 live_log.csv
 keeper_replica_*.csv
+base_live_log.csv
