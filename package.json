@@ -1,0 +1,15 @@
+{
+  "name": "arbitai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only DEX-to-DEX arbitrage scanner for cheap EVM chains",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "scan": "node bin/arbitai.js",
+    "start": "node bin/arbitai.js"
+  }
+}
