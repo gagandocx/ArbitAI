@@ -51,7 +51,17 @@ export async function scan(config, dataSource) {
   const trapCfg = config.trap ?? {};
   const rankCfg = config.rank ?? {};
   const tradeSize = config.tradeSize ?? 1000;
-  const gasUsdEstimate = config.gasUsdEstimate ?? 0;
+  // Configured slippage tolerance acts as a FLOOR on the slippage cost when a
+  // depth-based model is unavailable (e.g. a V3-quoter leg exposes no
+  // reserves). Without it the slippage column would be a structural 0 for the
+  // entire default config and net would overstate the edge. Default 0.5%.
+  const slippageFloor = Number(config.slippageTolerance ?? 0);
+
+  // Resolve a gas estimate for the round-trip. Prefer units*price when both are
+  // known (so trade/chain/market move the gas line); fall back to a flat quote
+  // estimate for offline runs. gasPriceQuote, when supplied, is already in the
+  // quote currency per gas unit (the live path derives it below).
+  const gas = await resolveGasEstimate(config, dataSource);
 
   const candidates = [];
 
@@ -70,6 +80,12 @@ export async function scan(config, dataSource) {
         liquidity: data.liquidity,
         reserve0: v2 ? v2.reserveBase : undefined,
         reserve1: v2 ? v2.reserveQuote : undefined,
+        // Pass decimals + price so the one-sided skew is computed on quote
+        // VALUE, not raw base units or token counts. reserveBase/reserveQuote
+        // correspond to base/quote decimals; v2.price is quote per base.
+        decimals0: v2 ? data.decimalsBase : undefined,
+        decimals1: v2 ? data.decimalsQuote : undefined,
+        price: v2 ? v2.price : undefined,
         poolCount: data.poolCount,
       },
       trapCfg,
@@ -96,14 +112,21 @@ export async function scan(config, dataSource) {
     }
 
     // --- net-after-costs ---------------------------------------------------
+    // Depth-based model when BOTH legs expose reserves; otherwise fall back to
+    // the configured slippage tolerance as a floor so price impact is never
+    // silently zero (every default pair has a reserve-less V3 leg).
     const slippageModel = buildSlippageModel(gap, data, tradeSize);
     const costResult = computeNetResult({
       tradeSize,
       rawGapFraction: gap.rawGapFraction,
       buyFeeBps: gap.buyDex.feeBps ?? 0,
       sellFeeBps: gap.sellDex.feeBps ?? 0,
-      gasUsdEstimate,
+      gasUsdEstimate: gas.gasUsdEstimate,
+      gasUnits: gas.gasUnits,
+      gasPrice: gas.gasPriceQuote,
       slippageModel,
+      slippageFraction: slippageFloor,
+      slippageFloor,
       buyDex: gap.buyDex.name,
       sellDex: gap.sellDex.name,
     });
@@ -130,9 +153,61 @@ export async function scan(config, dataSource) {
 }
 
 /**
+ * Resolve the gas estimate for a round-trip, in the quote currency.
+ *
+ * Priority:
+ *   1. Live gas price: if the dataSource exposes a provider with getGasPrice()
+ *      we read the live wei/gas, convert to the quote currency using
+ *      config.gasUnitsEstimate and config.nativeQuotePrice (quote per native
+ *      token), so gas reflects the actual chain/market. This is the wired
+ *      units*price path for the live RpcDataSource.
+ *   2. Config units*price: if config.gasPriceGwei (and gasUnitsEstimate and
+ *      nativeQuotePrice) are set, compute units*price offline without network.
+ *   3. Flat fallback: config.gasUsdEstimate (documented default for offline
+ *      runs where no live price is available, e.g. fixture scans).
+ *
+ * @returns {Promise<{gasUnits?:number, gasPriceQuote?:number,
+ *   gasUsdEstimate:number}>} computeNetResult uses gasUnits*gasPriceQuote when
+ *   both are finite, else gasUsdEstimate.
+ */
+export async function resolveGasEstimate(config, dataSource) {
+  const gasUnits = Number(config.gasUnitsEstimate);
+  const nativeQuotePrice = Number(config.nativeQuotePrice); // quote per native
+  const flat = Number(config.gasUsdEstimate ?? 0) || 0;
+
+  const canConvert =
+    Number.isFinite(gasUnits) && gasUnits > 0 && Number.isFinite(nativeQuotePrice) && nativeQuotePrice > 0;
+
+  // (1) Live gas price from the provider, if one is reachable.
+  const provider = dataSource && dataSource.provider;
+  if (canConvert && provider && typeof provider.getGasPrice === 'function') {
+    try {
+      const weiPerGas = await provider.getGasPrice(); // BigInt wei
+      const nativePerGas = Number(weiPerGas) / 1e18; // native token per gas unit
+      const gasPriceQuote = nativePerGas * nativeQuotePrice; // quote per gas unit
+      return { gasUnits, gasPriceQuote, gasUsdEstimate: flat };
+    } catch {
+      // Provider unreachable (offline): fall through to config/flat below.
+    }
+  }
+
+  // (2) Config-provided gas price (offline, no network).
+  const gasPriceGwei = Number(config.gasPriceGwei);
+  if (canConvert && Number.isFinite(gasPriceGwei) && gasPriceGwei > 0) {
+    const nativePerGas = gasPriceGwei * 1e-9; // gwei -> native token per gas unit
+    const gasPriceQuote = nativePerGas * nativeQuotePrice;
+    return { gasUnits, gasPriceQuote, gasUsdEstimate: flat };
+  }
+
+  // (3) Flat fallback for offline fixture runs.
+  return { gasUnits: undefined, gasPriceQuote: undefined, gasUsdEstimate: flat };
+}
+
+/**
  * Build the depth-based slippage model for computeNetResult when both legs have
- * V2-style reserves. Falls back to undefined (flat 0 slippage) when reserves
- * are not available (e.g. a V3-only leg), letting fees + gas dominate.
+ * V2-style reserves. Falls back to undefined (the caller then applies the
+ * configured slippage tolerance as a floor) when reserves are not available
+ * (e.g. a V3-only leg).
  */
 function buildSlippageModel(gap, data, tradeSize) {
   const { buyDex, sellDex } = gap;

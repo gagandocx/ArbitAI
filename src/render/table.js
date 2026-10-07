@@ -112,7 +112,10 @@ export function renderTable(rankedCandidates = [], opts = {}) {
   // Legend so a reader understands the verdicts without the README.
   lines.push(
     'Verdicts: profitable = net above floor | marginal = thin positive net | ' +
-      'unprofitable = net <= 0 | trap/avoid = honeypot / rigged pair.',
+      'unprofitable = net <= 0 | suspicious = soft trap (thin/one-sided/' +
+      'low-pool); net likely overstated, not a clean opportunity | ' +
+      'trap/avoid = honeypot / rigged pair. Clean rows rank first, then ' +
+      'suspicious, then avoid.',
   );
 
   return lines.join('\n');

@@ -46,10 +46,21 @@ export const DEFAULT_CONFIG = Object.freeze({
   // Slippage tolerance (fraction) the user is willing to accept; informational
   // for reporting (the realistic slippage cost is derived from pool depth).
   slippageTolerance: 0.005,
-  // Gas estimate for a round-trip, in the quote currency.
+  // Gas estimate for a round-trip, in the quote currency. Used as the flat
+  // fallback ONLY when neither a live gas price (RpcDataSource.provider
+  // getGasPrice()) nor a configured gasPriceGwei is available.
   gasUsdEstimate: 0.5,
-  // Rough gas units for a two-leg round-trip (used when a gas price is known).
+  // Rough gas units for a two-leg round-trip (used with any known gas price).
   gasUnitsEstimate: 400000,
+  // Offline/default gas price in gwei. With gasUnitsEstimate + nativeQuotePrice
+  // this drives the functional units*price gas path for fixture runs; the live
+  // RpcDataSource path overrides it with provider.getGasPrice(). Base is a
+  // cheap L2, so ~0.02 gwei is realistic.
+  gasPriceGwei: 0.02,
+  // Price of the chain's native token (ETH on Base) in the quote currency,
+  // used to convert gas (native) into the quote currency. Keep configurable so
+  // other chains/quote currencies can be swapped in.
+  nativeQuotePrice: 3000,
 
   trap: DEFAULT_TRAP,
   rank: DEFAULT_RANK,

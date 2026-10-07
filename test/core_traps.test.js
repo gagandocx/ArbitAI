@@ -43,8 +43,39 @@ test('thin liquidity below floor => suspicious', () => {
 });
 
 test('one-sided liquidity beyond skew bound => suspicious', () => {
-  // 100x skew exceeds the default 50x bound.
+  // 100x skew exceeds the default 50x bound (same decimals, no price).
   const r = evaluateTraps({ reserve0: 100n, reserve1: 10000n });
+  assert.ok(r.flags.includes(FLAGS.ONE_SIDED_LIQUIDITY));
+  assert.equal(r.verdict, 'suspicious');
+});
+
+test('balanced pool with mismatched decimals is NOT flagged one-sided', () => {
+  // WETH(18)/USDC(6): 4000 WETH vs 12,120,000 USDC. Raw integers differ by
+  // ~3030x and even human token counts differ by ~3030x, but with the WETH
+  // price (~3030 USDC) both sides hold ~equal VALUE, so no flag.
+  const r = evaluateTraps({
+    reserve0: 4000000000000000000000n, // 4000 WETH (18 dp)
+    reserve1: 12120000000000n, // 12,120,000 USDC (6 dp)
+    decimals0: 18,
+    decimals1: 6,
+    price: 3030, // USDC per WETH
+  });
+  assert.ok(
+    !r.flags.includes(FLAGS.ONE_SIDED_LIQUIDITY),
+    'balanced value across mismatched decimals must not false-flag',
+  );
+  assert.equal(r.verdict, 'ok');
+});
+
+test('genuinely one-sided value IS flagged even with decimals/price', () => {
+  // 4000 WETH (~$12M) vs only 100 USDC: real value imbalance ~120000x.
+  const r = evaluateTraps({
+    reserve0: 4000000000000000000000n,
+    reserve1: 100000000n, // 100 USDC
+    decimals0: 18,
+    decimals1: 6,
+    price: 3030,
+  });
   assert.ok(r.flags.includes(FLAGS.ONE_SIDED_LIQUIDITY));
   assert.equal(r.verdict, 'suspicious');
 });

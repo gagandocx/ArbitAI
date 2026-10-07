@@ -19,9 +19,14 @@ mid-caps.
 - **Strictly read-only.** ArbitAI only performs `eth_call` / view reads. It
   **never submits transactions, never signs anything, holds no private keys and
   no wallet, and cannot move or risk any funds.** There is no key material
-  anywhere in the codebase. This boundary is enforced by an automated test
-  (`test/readonly_guard.test.js`) that fails the build if any transaction-send
-  or key-handling primitive appears in `src/` or `bin/`.
+  anywhere in the codebase. This boundary is enforced **two ways**: (1) the
+  JSON-RPC provider's `send()` checks every method against a positive
+  **read-method allowlist** (`eth_call`, `eth_blockNumber`, `eth_gasPrice`,
+  `eth_chainId`, and a few other read methods) and throws on anything else, so a
+  state-changing method such as `eth_sendTransaction`, `eth_sendRawTransaction`,
+  or `eth_sign` is refused in code before any request is built; and (2) an
+  automated test (`test/readonly_guard.test.js`) fails the build if any
+  transaction-send or key-handling primitive appears in `src/` or `bin/`.
 - **This is NOT financial advice.** A "profitable" verdict is a model estimate
   based on fixture or on-chain snapshot data and simplifying assumptions. Real
   execution involves latency, MEV, revert risk, and changing liquidity. Do your
@@ -54,8 +59,9 @@ You will get a ranked ASCII table like:
 +------------+------------------------+-----------+--------+-------------+-------------------------------------------+--------------+
 | PAIR       | BUY@ / SELL@           | RAW GAP % |  NET % | NET (quote) | TRAP FLAGS                                | VERDICT      |
 +============+========================+===========+========+=============+===========================================+==============+
-| WETH/USDC  | UniswapV3 -> Aerodrome |     1.00% |  0.65% |       64.50 | -                                         | profitable   |
-| USDT/USDC  | UniswapV3 -> Aerodrome |     3.00% |  2.65% |      264.50 | SELL_BLOCKED,NON_SELLABLE,FEE_ON_TRANSFER | trap/avoid   |
+| WETH/USDC  | UniswapV3 -> Aerodrome |     1.00% |  0.15% |       14.98 | -                                         | profitable   |
+| USDC/WETH  | UniswapV3 -> Aerodrome |     3.03% |  2.18% |      218.01 | THIN_LIQUIDITY,ONE_SIDED,LOW_POOL_COUNT   | suspicious   |
+| USDT/USDC  | UniswapV3 -> Aerodrome |     3.00% |  2.15% |      214.98 | SELL_BLOCKED,NON_SELLABLE,FEE_ON_TRANSFER | trap/avoid   |
 +------------+------------------------+-----------+--------+-------------+-------------------------------------------+--------------+
 ```
 
@@ -109,17 +115,41 @@ actually keep:
    (e.g. Uniswap V3 0.05% tier + Aerodrome 0.30%), applied to the trade size.
 2. **Slippage at the trade size.** Price impact from constant-product pool depth
    is modelled on both legs, so bigger trades against thinner pools cost more.
-   `--trade-size` drives this directly.
+   `--trade-size` drives this directly. When a leg exposes no reserves to model
+   (e.g. a Uniswap V3 quoter leg), the configured **slippage tolerance**
+   (`--slippage`, default 0.5%) is applied as a **floor** so price impact is
+   never silently counted as zero. The floor is also a minimum when a depth
+   model *is* available, so a shallow leg can never understate impact.
 3. **Estimated gas.** A round-trip gas estimate (in the quote currency) is always
-   subtracted, even on cheap L2s like Base.
+   subtracted, even on cheap L2s like Base. Gas is computed as
+   `gasUnits * gasPrice`: `gasUnits` comes from config (`gasUnitsEstimate`), and
+   the gas price comes from the live `eth_gasPrice` read on a live run, or from
+   the configured `gasPriceGwei` on an offline/fixture run, converted to the
+   quote currency via `nativeQuotePrice`. A flat `gasUsdEstimate` is the
+   documented fallback only when neither a live nor a configured gas price is
+   available.
 
 ```
 net = (rawGap * tradeSize) - buyFee - sellFee - slippage - gas
 ```
 
-The result is ranked best-net-first, with each row given a verdict:
-`profitable` (net above the floor), `marginal` (thin positive net),
-`unprofitable` (net <= 0), or `trap/avoid` (see below).
+The result is ranked **best-net-first within tiers**, with each row given a
+verdict:
+
+- `profitable` — clean pair, net above the floor.
+- `marginal` — clean pair, thin positive net.
+- `unprofitable` — clean pair, net <= 0.
+- `suspicious` — a soft trap (thin / one-sided / low pool count). Still shown,
+  but ranked **below every clean pair** and marked non-actionable: its net is
+  typically overstated against shallow or skewed depth, so a `suspicious` pair
+  is never presented as a clean top opportunity even when its net is the
+  highest number in the table.
+- `trap/avoid` — a hard trap (honeypot / rigged); demoted to the bottom.
+
+Ordering is strictly tiered: all clean rows first (net descending), then
+suspicious rows (net descending), then avoid rows. This is why in the demo above
+the `suspicious` USDC/WETH row (net 218) sits **below** the clean `profitable`
+WETH/USDC row (net 15).
 
 ## Trap / honeypot heuristics
 
@@ -133,14 +163,22 @@ interpret already-fetched read data (reserves plus a read-only sell simulation):
   more than the tolerance, implying the token skims a cut on transfer.
 - **THIN_LIQUIDITY** — pool depth below the configured floor (prone to huge
   slippage / manipulation).
-- **ONE_SIDED_LIQUIDITY** — reserve ratio beyond the skew bound; the price is
-  unreliable.
+- **ONE_SIDED_LIQUIDITY** — reserve skew beyond the bound; the price is
+  unreliable. The skew is measured on **quote value** (reserves normalized by
+  token decimals, then the base side valued at the pool price), not on raw
+  reserve integers. This matters for majors with mismatched decimals: a balanced
+  WETH/USDC pool holds ~4,000 WETH against ~12,000,000 USDC — a ~3,000x ratio in
+  raw/human token counts even though each side holds roughly equal value — and a
+  naive raw-integer comparison would false-flag it. Only a genuine value
+  imbalance is flagged.
 - **LOW_POOL_COUNT** — too few discoverable pools to be confident.
 
 Any hard trap (`SELL_BLOCKED`, `NON_SELLABLE`, `FEE_ON_TRANSFER`) yields a verdict
 of `avoid`; those rows are demoted to the bottom of the table and flagged, never
 treated as actionable. Soft signals (thin / one-sided / low pool count) mark a
-pair `suspicious` but keep it in the ranking.
+pair `suspicious`: it stays visible in the ranking but is demoted below every
+clean pair and is never actionable, so a thin/skewed pair cannot be presented as
+a clean top opportunity.
 
 ## Swapping chains, DEXes, and tokens
 

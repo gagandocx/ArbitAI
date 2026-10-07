@@ -1,12 +1,23 @@
 // Pure candidate ranking. NO network, NO I/O, NO imports from evm/rpc.
 //
 // rankCandidates takes the net-after-costs result plus the trap verdict for
-// each candidate pair and produces an ordered, annotated list for display:
-//   - rows whose trap verdict is 'avoid' are demoted to the bottom and clearly
-//     flagged (they are never actionable), optionally excluded entirely;
-//   - the remaining rows are sorted by net descending (best edge first);
-//   - every row gets a final per-row verdict combining net sign and trap
-//     verdict: 'profitable' | 'marginal' | 'unprofitable' | 'trap/avoid'.
+// each candidate pair and produces an ordered, annotated list for display.
+// There are THREE tiers, strongest-to-weakest:
+//   1. clean survivors (trap verdict 'ok')      — sorted by net descending;
+//   2. suspicious survivors (soft traps: thin /  — demoted below ALL clean
+//      one-sided / low-pool-count)                 survivors but still visible,
+//                                                   sorted by net among
+//                                                   themselves, labelled
+//                                                   'suspicious';
+//   3. avoid rows (hard traps: sell-blocked /    — demoted to the very bottom,
+//      fee-on-transfer)                             never actionable, optionally
+//                                                   excluded entirely.
+// This keeps a thin/one-sided/low-pool pair OFF the top "clean opportunity"
+// line even when its (slippage-light) net is high: a soft-trap pair can never
+// outrank a clean profitable survivor.
+//
+// Every row gets a final per-row verdict combining net sign and trap verdict:
+//   'profitable' | 'marginal' | 'unprofitable' | 'suspicious' | 'trap/avoid'.
 
 export const DEFAULT_RANK_CONFIG = Object.freeze({
   // Net below this (quote currency) but >= 0 is "marginal" rather than clearly
@@ -19,13 +30,21 @@ export const DEFAULT_RANK_CONFIG = Object.freeze({
 
 /**
  * Derive a per-row verdict from the net result and the trap verdict.
+ *
+ * A hard trap ('avoid') always wins. A soft trap ('suspicious') yields the
+ * dedicated 'suspicious' verdict so a thin / one-sided / low-pool pair is NEVER
+ * presented as a clean 'profitable' opportunity, regardless of its (often
+ * slippage-light, overstated) net. Only genuinely clean rows reach the net-sign
+ * ladder of profitable / marginal / unprofitable.
+ *
  * @param {number} net net-after-costs in quote currency.
  * @param {string} trapVerdict 'ok' | 'suspicious' | 'avoid'.
  * @param {number} marginalNetFloor threshold between marginal and profitable.
- * @returns {'profitable'|'marginal'|'unprofitable'|'trap/avoid'}
+ * @returns {'profitable'|'marginal'|'unprofitable'|'suspicious'|'trap/avoid'}
  */
 export function rowVerdict(net, trapVerdict, marginalNetFloor) {
   if (trapVerdict === 'avoid') return 'trap/avoid';
+  if (trapVerdict === 'suspicious') return 'suspicious';
   if (net <= 0) return 'unprofitable';
   if (net < marginalNetFloor) return 'marginal';
   return 'profitable';
@@ -40,8 +59,10 @@ export function rowVerdict(net, trapVerdict, marginalNetFloor) {
  *   classification. Extra fields (pair, rawGap, flags, ...) pass through.
  * @param {object} [config] overrides (see DEFAULT_RANK_CONFIG).
  * @returns {Array<object>} new array of annotated rows. Each row gains
- *   `rowVerdict` and `actionable` (boolean). Non-avoid rows come first sorted
- *   by net descending; avoid rows come last (unless excludeAvoid is set).
+ *   `rowVerdict` and `actionable` (boolean). Ordering is three-tiered: clean
+ *   survivors (net desc) first, then suspicious soft-trap rows (net desc),
+ *   then avoid rows (net desc, unless excludeAvoid drops them). Only clean rows
+ *   with positive net are `actionable`.
  */
 export function rankCandidates(candidates = [], config = {}) {
   const cfg = { ...DEFAULT_RANK_CONFIG, ...config };
@@ -50,27 +71,30 @@ export function rankCandidates(candidates = [], config = {}) {
     const trapVerdict = c.trap?.verdict ?? c.trapVerdict ?? 'ok';
     const net = Number(c.net);
     const isAvoid = trapVerdict === 'avoid';
+    const isSuspicious = trapVerdict === 'suspicious';
     const verdict = rowVerdict(net, trapVerdict, cfg.marginalNetFloor);
     return {
       ...c,
       net,
       trapVerdict,
       rowVerdict: verdict,
-      actionable: !isAvoid && net > 0,
+      // Only a clean (non-trap) row with a positive net is a real opportunity.
+      // Suspicious rows stay visible but are NOT actionable: their net is
+      // typically overstated (shallow/one-sided depth) and must not be chased.
+      actionable: !isAvoid && !isSuspicious && net > 0,
     };
   });
 
-  const survivors = annotated.filter((r) => r.trapVerdict !== 'avoid');
+  const clean = annotated.filter((r) => r.trapVerdict === 'ok');
+  const suspicious = annotated.filter((r) => r.trapVerdict === 'suspicious');
   const avoided = annotated.filter((r) => r.trapVerdict === 'avoid');
 
-  // Best net first among survivors. Deterministic tie-break keeps order stable.
-  survivors.sort((a, b) => {
-    if (b.net !== a.net) return b.net - a.net;
-    return 0;
-  });
-  // Avoid rows: also net-desc among themselves, purely for readable output.
-  avoided.sort((a, b) => b.net - a.net);
+  // Net descending within each tier. Deterministic tie-break keeps order stable.
+  const byNetDesc = (a, b) => (b.net !== a.net ? b.net - a.net : 0);
+  clean.sort(byNetDesc);
+  suspicious.sort(byNetDesc);
+  avoided.sort(byNetDesc);
 
-  if (cfg.excludeAvoid) return survivors;
-  return [...survivors, ...avoided];
+  if (cfg.excludeAvoid) return [...clean, ...suspicious];
+  return [...clean, ...suspicious, ...avoided];
 }

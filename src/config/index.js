@@ -72,6 +72,12 @@ export function buildConfig(opts = {}) {
     slippageTolerance: overrides.slippageTolerance ?? 0.005,
     gasUsdEstimate: overrides.gasUsdEstimate ?? 0.5,
     gasUnitsEstimate: overrides.gasUnitsEstimate ?? 400000,
+    // Gas price (gwei) and native-token price (quote currency) drive the
+    // functional units*price gas path. The live RpcDataSource overrides the
+    // gas price via provider.getGasPrice(); for offline/fixture runs these
+    // supply a realistic, configurable gas cost instead of the flat fallback.
+    gasPriceGwei: overrides.gasPriceGwei ?? chain.defaultGasPriceGwei ?? 0.02,
+    nativeQuotePrice: overrides.nativeQuotePrice ?? chain.nativeQuotePrice ?? 3000,
     trap: { ...DEFAULT_TRAP, ...(overrides.trap ?? {}) },
     rank: { ...DEFAULT_RANK, ...(overrides.rank ?? {}) },
   };

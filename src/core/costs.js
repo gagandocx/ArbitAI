@@ -69,6 +69,10 @@ export function legSlippageFraction(amountIn, reserveIn, reserveOut) {
  *   slippage is derived from the constant-product price impact on BOTH legs.
  * @param {number} [params.slippageFraction] fallback flat slippage fraction if
  *   no depth model is supplied (defaults to 0).
+ * @param {number} [params.slippageFloor] a minimum slippage fraction applied
+ *   even when a depth model IS supplied. Guards against understating impact
+ *   when one leg (e.g. a V3 quoter) exposes no reserves to model. The final
+ *   slippage fraction is max(modelled-or-flat, floor).
  * @param {string} [params.buyDex] label, carried through for reporting.
  * @param {string} [params.sellDex] label, carried through for reporting.
  * @returns {{ rawGap:number, grossGap:number, feeCost:number,
@@ -87,6 +91,7 @@ export function computeNetResult(params) {
     gasPrice,
     slippageModel,
     slippageFraction = 0,
+    slippageFloor = 0,
     buyDex = null,
     sellDex = null,
   } = params;
@@ -125,6 +130,11 @@ export function computeNetResult(params) {
   } else {
     slipFraction = Number(slippageFraction) || 0;
   }
+  // Floor guards against understating impact when depth is only partially
+  // modelled (e.g. one leg is a reserve-less V3 quoter): never charge less
+  // than the configured tolerance.
+  const floor = Number(slippageFloor) || 0;
+  if (floor > slipFraction) slipFraction = floor;
   const slippageCost = slipFraction * size;
 
   // --- gas cost: always included, even on cheap chains like Base -----------

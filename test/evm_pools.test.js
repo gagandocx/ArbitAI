@@ -152,6 +152,42 @@ test('JsonRpcProvider throws OfflineError on a non-2xx HTTP status', async () =>
   );
 });
 
+test('send() refuses a method not on the read-only allowlist', async () => {
+  let fetched = false;
+  const provider = new JsonRpcProvider('https://rpc.ok.example', {
+    fetch: async () => {
+      fetched = true;
+      return { status: 200, async json() { return { result: '0x1' }; } };
+    },
+  });
+  // A disallowed (non-read) method must throw BEFORE any request is built.
+  await assert.rejects(
+    () => provider.send('eth_submitWork', []),
+    (err) => {
+      assert.equal(err.name, 'RpcError');
+      assert.equal(err.code, 'E_METHOD_NOT_ALLOWED');
+      assert.match(err.message, /not permitted/);
+      assert.match(err.message, /read-only/);
+      return true;
+    },
+  );
+  assert.equal(fetched, false, 'no request may be issued for a refused method');
+});
+
+test('send() allows the read methods on the allowlist', async () => {
+  const provider = new JsonRpcProvider('https://rpc.ok.example', {
+    fetch: async () => ({
+      status: 200,
+      async json() { return { jsonrpc: '2.0', id: 1, result: '0x2105' }; },
+    }),
+  });
+  // Each public read helper routes through an allowlisted method and succeeds.
+  assert.equal(await provider.chainId(), 0x2105);
+  assert.equal(await provider.getBlockNumber(), 0x2105);
+  assert.equal(await provider.call(PAIR, '0x'), '0x2105');
+  assert.equal(await provider.getGasPrice(), 0x2105n);
+});
+
 test('JsonRpcProvider returns a decoded result on a healthy response', async () => {
   const provider = new JsonRpcProvider('https://rpc.ok.example', {
     fetch: async () => ({

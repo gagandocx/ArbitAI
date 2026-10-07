@@ -87,6 +87,92 @@ test('the thin / one-sided pair is suspicious (not avoid)', async () => {
   assert.notEqual(thin.rowVerdict, 'trap/avoid');
 });
 
+// --- regression: the headline mislead the review caught ------------------
+// The USDC/WETH fixture pair is the thinnest, most skewed, single-pool pair
+// with the highest raw gap. Before the fix it was labelled 'profitable' and
+// ranked #1 above the genuinely clean WETH/USDC pair. These assertions pin the
+// intended behavior so that bug cannot ship green again.
+test('a suspicious pair gets the suspicious verdict and never ranks #1', async () => {
+  const rows = await scan(DEFAULT_CONFIG, new FixtureDataSource(fixture));
+  const suspicious = rowFor(rows, 'USDC/WETH');
+  const clean = rowFor(rows, 'WETH/USDC');
+
+  // Verdict is 'suspicious', NOT 'profitable', despite a high positive net.
+  assert.ok(suspicious.net > 0, 'suspicious pair still has a high positive net');
+  assert.equal(suspicious.rowVerdict, 'suspicious');
+  assert.notEqual(suspicious.rowVerdict, 'profitable');
+  assert.equal(suspicious.actionable, false, 'suspicious is not actionable');
+
+  // The clean profitable pair is the top row; the suspicious pair is below it
+  // even though its net is larger.
+  assert.equal(clean.rowVerdict, 'profitable');
+  assert.equal(rows[0].pair, 'WETH/USDC', 'clean pair ranks #1');
+  assert.ok(
+    rows.indexOf(clean) < rows.indexOf(suspicious),
+    'clean profitable pair outranks the higher-net suspicious pair',
+  );
+});
+
+// --- regression: the designated clean pair must NOT be false-flagged -------
+test('the clean WETH/USDC pair is not false-flagged one-sided (decimals)', async () => {
+  const rows = await scan(DEFAULT_CONFIG, new FixtureDataSource(fixture));
+  const clean = rowFor(rows, 'WETH/USDC');
+  assert.ok(
+    !clean.flags.includes('ONE_SIDED_LIQUIDITY'),
+    'balanced WETH/USDC (18 vs 6 decimals) must not be flagged one-sided',
+  );
+  assert.equal(clean.trapVerdict, 'ok');
+  assert.equal(clean.rowVerdict, 'profitable');
+});
+
+// --- regression: slippage is charged even for V3-legged pairs --------------
+test('slippage is applied (non-zero) for V3-legged pairs via the floor', async () => {
+  const rows = await scan(DEFAULT_CONFIG, new FixtureDataSource(fixture));
+  const clean = rowFor(rows, 'WETH/USDC');
+  // Every default pair has a reserve-less V3 leg, so the depth model is
+  // unavailable; the configured slippageTolerance floor must still apply.
+  const expectedFloor = DEFAULT_CONFIG.slippageTolerance * DEFAULT_CONFIG.tradeSize;
+  assert.ok(clean.slippageCost > 0, 'slippage cost is not silently zero');
+  assert.ok(
+    Math.abs(clean.slippageCost - expectedFloor) < 1e-6,
+    `slippage floor (${expectedFloor}) applied, got ${clean.slippageCost}`,
+  );
+});
+
+// --- gas reflects the units*price path, not just a flat constant -----------
+test('gas uses the configured units*price path, not the flat fallback', async () => {
+  const rows = await scan(DEFAULT_CONFIG, new FixtureDataSource(fixture));
+  const clean = rowFor(rows, 'WETH/USDC');
+  // units*price: 400000 * (0.02 gwei -> native/gas) * nativeQuotePrice.
+  const nativePerGas = DEFAULT_CONFIG.gasPriceGwei * 1e-9;
+  const expectedGas =
+    DEFAULT_CONFIG.gasUnitsEstimate * nativePerGas * DEFAULT_CONFIG.nativeQuotePrice;
+  assert.ok(
+    Math.abs(clean.gasCost - expectedGas) < 1e-6,
+    `gas from units*price (${expectedGas}), got ${clean.gasCost}`,
+  );
+  assert.notEqual(clean.gasCost, DEFAULT_CONFIG.gasUsdEstimate, 'not the flat fallback');
+});
+
+// --- live gas path: provider.getGasPrice() wired into the scan -------------
+test('live gas price from the provider is wired into the gas cost', async () => {
+  // A dataSource exposing a provider.getGasPrice() should drive the gas line.
+  const base = new FixtureDataSource(fixture);
+  const liveLike = {
+    provider: { async getGasPrice() { return 50_000_000n; } }, // 0.05 gwei in wei
+    getPairData: (pair) => base.getPairData(pair),
+  };
+  const rows = await scan(DEFAULT_CONFIG, liveLike);
+  const clean = rowFor(rows, 'WETH/USDC');
+  const nativePerGas = Number(50_000_000n) / 1e18;
+  const expectedGas =
+    DEFAULT_CONFIG.gasUnitsEstimate * nativePerGas * DEFAULT_CONFIG.nativeQuotePrice;
+  assert.ok(
+    Math.abs(clean.gasCost - expectedGas) < 1e-6,
+    `live gas (${expectedGas}) from provider.getGasPrice(), got ${clean.gasCost}`,
+  );
+});
+
 test('excludeAvoid config drops avoid rows entirely', async () => {
   const cfg = { ...DEFAULT_CONFIG, rank: { ...DEFAULT_CONFIG.rank, excludeAvoid: true } };
   const rows = await scan(cfg, new FixtureDataSource(fixture));

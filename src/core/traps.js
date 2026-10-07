@@ -56,6 +56,15 @@ function toNum(v) {
  *     currency used for the thin-liquidity test.
  *   @param {bigint|number} [tokenData.reserve0] raw reserve of token0.
  *   @param {bigint|number} [tokenData.reserve1] raw reserve of token1.
+ *   @param {number} [tokenData.decimals0] decimals for reserve0, used to
+ *     normalize raw base units to human units before the skew ratio.
+ *   @param {number} [tokenData.decimals1] decimals for reserve1.
+ *   @param {number} [tokenData.price] price of token0 in units of token1
+ *     (quote per base). When supplied the skew is computed on QUOTE VALUE
+ *     (reserve0*price vs reserve1) rather than token counts, so a balanced
+ *     WETH/USDC pool (1 WETH ~= 3000 USDC, i.e. 1 vs 3000 in human counts) is
+ *     NOT mis-flagged as one-sided. Falls back to human token counts when no
+ *     price is given.
  *   @param {number} [tokenData.poolCount] number of discoverable pools.
  * @param {object} [config] threshold overrides (see DEFAULT_TRAP_CONFIG).
  * @returns {{ flags: string[], verdict: 'ok'|'suspicious'|'avoid',
@@ -114,12 +123,27 @@ export function evaluateTraps(tokenData = {}, config = {}) {
     }
   }
 
-  // (d) ONE_SIDED_LIQUIDITY — reserve ratio beyond the skew bound.
+  // (d) ONE_SIDED_LIQUIDITY — reserve skew beyond the bound. The skew MUST be
+  // computed on comparable magnitudes, not raw integers. Two corrections:
+  //   1. normalize each raw reserve to human units via its decimals (WETH 18
+  //      vs USDC 6 otherwise look ~1e12 apart on a balanced pool);
+  //   2. when the price of token0 in token1 is known, compare QUOTE VALUE
+  //      (humanBase*price vs humanQuote) rather than token counts — a balanced
+  //      WETH/USDC pool holds ~1 WETH per ~3000 USDC in human counts, which
+  //      would still trip a count-based ratio even though value is equal.
+  // Only a genuine value imbalance (e.g. 60x more value on one side) is flagged.
   if (tokenData.reserve0 !== undefined && tokenData.reserve1 !== undefined) {
-    const r0 = toNum(tokenData.reserve0);
-    const r1 = toNum(tokenData.reserve1);
-    if (r0 > 0 && r1 > 0) {
-      const skew = Math.max(r0, r1) / Math.min(r0, r1);
+    const d0 = Number(tokenData.decimals0 ?? 0);
+    const d1 = Number(tokenData.decimals1 ?? 0);
+    const human0 = toNum(tokenData.reserve0) / 10 ** d0;
+    const human1 = toNum(tokenData.reserve1) / 10 ** d1;
+    const price = Number(tokenData.price);
+    const hasPrice = Number.isFinite(price) && price > 0;
+    // Value of each side in quote currency when a price is available.
+    const v0 = hasPrice ? human0 * price : human0;
+    const v1 = human1;
+    if (v0 > 0 && v1 > 0) {
+      const skew = Math.max(v0, v1) / Math.min(v0, v1);
       if (skew > cfg.maxReserveSkew) {
         flags.push(FLAGS.ONE_SIDED_LIQUIDITY);
         reasons.push(

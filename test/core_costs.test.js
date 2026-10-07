@@ -103,6 +103,44 @@ test('slippageModel derives slippage from constant-product impact on BOTH legs',
   assert.ok(Math.abs(r.slippageCost - 2 * oneLeg * 10000) < 1e-6);
 });
 
+test('slippageFloor applies when no depth model is available (V3 leg)', () => {
+  // No slippageModel (a reserve-less V3 leg). The floor must be charged so
+  // slippage is never silently zero.
+  const r = computeNetResult({
+    tradeSize: 10000,
+    rawGapFraction: 0.02,
+    buyFeeBps: 0,
+    sellFeeBps: 0,
+    gasUsdEstimate: 0,
+    slippageFloor: 0.005, // 0.5%
+  });
+  assert.equal(r.slippageCost, 50, '0.5% of $10,000');
+  assert.equal(r.net, 200 - 50);
+});
+
+test('slippageFloor acts as a MINIMUM even when a depth model is supplied', () => {
+  // Deep pools => tiny modelled impact; the floor dominates.
+  const r = computeNetResult({
+    tradeSize: 10000,
+    rawGapFraction: 0.02,
+    buyFeeBps: 0,
+    sellFeeBps: 0,
+    gasUsdEstimate: 0,
+    slippageFloor: 0.005,
+    slippageModel: {
+      // Trade of 1e6 units against 1e15-deep pools => ~1e-9 modelled impact,
+      // far below the 0.5% floor, so the floor must win.
+      amountIn: 10n ** 6n,
+      buyReserveIn: 10n ** 15n,
+      buyReserveOut: 10n ** 15n,
+      sellReserveIn: 10n ** 15n,
+      sellReserveOut: 10n ** 15n,
+    },
+  });
+  // Modelled impact on such deep pools is ~0, so the 0.5% floor is used.
+  assert.equal(r.slippageCost, 50);
+});
+
 test('computeNetResult rejects a non-positive trade size', () => {
   assert.throws(() => computeNetResult({ tradeSize: 0, rawGapFraction: 0.01 }));
 });

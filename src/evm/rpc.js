@@ -1,9 +1,12 @@
 // Strictly READ-ONLY JSON-RPC provider over the global fetch API.
 //
 // This provider exposes ONLY read methods (eth_call, eth_blockNumber,
-// eth_gasPrice, eth_chainId). It deliberately does NOT implement any method
-// that broadcasts or authorizes a state change, and it never touches keys of
-// any kind. The read-only boundary is enforced by test/readonly_guard.test.js.
+// eth_gasPrice, eth_chainId, and a few other read methods). It deliberately
+// does NOT implement any method that broadcasts or authorizes a state change,
+// and it never touches keys of any kind. The read-only boundary is enforced
+// TWO ways: (1) send() refuses any method not on the ALLOWED_METHODS positive
+// allowlist, so a disallowed method throws before a request is built; and
+// (2) test/readonly_guard.test.js greps the source tree for write primitives.
 //
 // On any network trouble (fetch rejection, non-2xx HTTP status, proxy block,
 // or an aborted timeout) it throws a typed OfflineError carrying a clear,
@@ -41,6 +44,25 @@ export class RpcError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000;
+
+// Positive allowlist of JSON-RPC methods this provider is permitted to issue.
+// It is intentionally defined as READ methods only; any method not listed here
+// (including every state-changing / authorizing method) is refused by send()
+// before a request is ever built. This makes the read-only boundary structural
+// — enforced by code — rather than resting only on which methods callers
+// happen to use or on the grep guard over source text. See README.md for the
+// full read-only rationale and the list of refused method families.
+export const ALLOWED_METHODS = Object.freeze([
+  'eth_call',
+  'eth_blockNumber',
+  'eth_gasPrice',
+  'eth_chainId',
+  'eth_getBlockByNumber',
+  'eth_feeHistory',
+  'net_version',
+]);
+
+const ALLOWED_METHOD_SET = new Set(ALLOWED_METHODS);
 
 /**
  * A minimal read-only JSON-RPC provider.
@@ -82,6 +104,17 @@ export class JsonRpcProvider {
    * @returns {Promise<any>} the `result` field of the response.
    */
   async send(method, params = []) {
+    // Enforce the read-only boundary in code: refuse anything not on the
+    // positive read-method allowlist before a request is constructed.
+    if (!ALLOWED_METHOD_SET.has(method)) {
+      throw new RpcError(
+        `JsonRpcProvider: method "${method}" is not permitted. This is a ` +
+          'strictly read-only provider; allowed methods: ' +
+          `${ALLOWED_METHODS.join(', ')}.`,
+        { code: 'E_METHOD_NOT_ALLOWED' },
+      );
+    }
+
     const body = JSON.stringify({
       jsonrpc: '2.0',
       id: ++this._id,
