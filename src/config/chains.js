@@ -2,8 +2,8 @@
 // currency symbol used for cost/gas accounting, and a default RPC endpoint.
 //
 // Base is the DEFAULT: a cheap, high-liquidity L2 that is ideal for a read-only
-// cross-DEX scanner. BSC and Arbitrum are provided as COMMENTED stubs further
-// down to demonstrate that swapping chains is purely a config change.
+// cross-DEX scanner. BNB Smart Chain and Arbitrum One are also supported; each
+// chain is purely a config change (chain descriptor + DEX set + token list).
 //
 // STRICTLY READ-ONLY: these endpoints are used for eth_call / view reads only.
 
@@ -26,8 +26,10 @@ export function resolveBaseRpcUrl(env = process.env) {
   return PUBLIC_BASE_RPC_URL;
 }
 
-// A free, public Base mainnet endpoint. No key required.
+// Free, public mainnet endpoints. No key required.
 export const PUBLIC_BASE_RPC_URL = 'https://mainnet.base.org';
+export const PUBLIC_BSC_RPC_URL = 'https://bsc-dataseed.binance.org';
+export const PUBLIC_ARBITRUM_RPC_URL = 'https://arb1.arbitrum.io/rpc';
 
 export const BASE = Object.freeze({
   key: 'base',
@@ -36,36 +38,47 @@ export const BASE = Object.freeze({
   quoteSymbol: 'USDC',
   // Resolved lazily by the config index so env changes are honored per run.
   defaultRpcUrl: PUBLIC_BASE_RPC_URL,
+  // Alchemy subdomain used when ALCHEMY_KEY is set (no secret hardcoded).
+  alchemyHost: 'base-mainnet.g.alchemy.com',
+  // Gas accounting fallbacks (native is ETH on this L2). buildConfig reads
+  // these when overrides are not supplied.
+  defaultGasPriceGwei: 0.02,
+  nativeQuotePrice: 3000,
+});
+
+export const BSC = Object.freeze({
+  key: 'bsc',
+  name: 'BNB Smart Chain',
+  chainId: 56,
+  quoteSymbol: 'USDT',
+  defaultRpcUrl: PUBLIC_BSC_RPC_URL,
+  alchemyHost: 'bnb-mainnet.g.alchemy.com',
+  // Native token is BNB; quote is USDT. BSC gas is denominated in BNB, so
+  // nativeQuotePrice is BNB priced in USDT.
+  defaultGasPriceGwei: 1,
+  nativeQuotePrice: 600,
+});
+
+export const ARBITRUM = Object.freeze({
+  key: 'arbitrum',
+  name: 'Arbitrum One',
+  chainId: 42161,
+  quoteSymbol: 'USDC',
+  defaultRpcUrl: PUBLIC_ARBITRUM_RPC_URL,
+  alchemyHost: 'arb-mainnet.g.alchemy.com',
+  // Native token is ETH; quote is USDC.
+  defaultGasPriceGwei: 0.1,
+  nativeQuotePrice: 3000,
 });
 
 // All chains known to the tool, keyed by their CLI --chain value.
 export const CHAINS = Object.freeze({
   base: BASE,
+  bsc: BSC,
+  arbitrum: ARBITRUM,
 });
 
 // The chain used when --chain is not supplied.
 export const DEFAULT_CHAIN_KEY = 'base';
-
-// ---------------------------------------------------------------------------
-// SWAPPABILITY STUBS (commented). To scan another chain, uncomment the block,
-// add the matching DEX + token definitions (see dexes.js / tokens.js), and
-// register it in CHAINS above. Nothing else in the pipeline needs to change.
-// ---------------------------------------------------------------------------
-//
-// export const BSC = Object.freeze({
-//   key: 'bsc',
-//   name: 'BNB Smart Chain',
-//   chainId: 56,
-//   quoteSymbol: 'USDT',
-//   defaultRpcUrl: 'https://bsc-dataseed.binance.org',
-// });
-//
-// export const ARBITRUM = Object.freeze({
-//   key: 'arbitrum',
-//   name: 'Arbitrum One',
-//   chainId: 42161,
-//   quoteSymbol: 'USDC',
-//   defaultRpcUrl: 'https://arb1.arbitrum.io/rpc',
-// });
 
 export default CHAINS;

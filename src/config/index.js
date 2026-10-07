@@ -14,19 +14,38 @@ export { DEFAULT_CONFIG, TOKENS, DEXES, PAIRS } from './default.js';
 export { CHAINS, DEFAULT_CHAIN_KEY, resolveBaseRpcUrl, PUBLIC_BASE_RPC_URL } from './chains.js';
 
 /**
- * Resolve the RPC URL for a chain. For Base this honors RPC_URL / ALCHEMY_KEY;
- * other chains fall back to their configured defaultRpcUrl.
+ * Resolve the RPC URL for any chain. Priority (per chain):
+ *   1. env.RPC_URL                                (explicit override)
+ *   2. composed Alchemy URL when ALCHEMY_KEY set  (per-chain hostname)
+ *   3. the chain's public defaultRpcUrl           (no key required)
+ *
+ * No secret is ever hardcoded: ALCHEMY_KEY is read from the injected env only,
+ * and when it is unset the public endpoint is used instead.
  *
  * @param {object} chain a chain descriptor from CHAINS.
  * @param {object} [env=process.env] environment to read overrides from.
  * @returns {string} the resolved RPC URL.
  */
 export function resolveRpcUrl(chain, env = process.env) {
+  // Base keeps its dedicated resolver for backward compatibility; it applies
+  // the same RPC_URL -> Alchemy -> public priority.
   if (chain && chain.key === 'base') return resolveBaseRpcUrl(env);
-  // Generic override for any other chain.
+
+  // (1) Explicit override wins for any chain.
   if (env && typeof env.RPC_URL === 'string' && env.RPC_URL.trim() !== '') {
     return env.RPC_URL.trim();
   }
+  // (2) Compose a per-chain Alchemy URL when a key is present.
+  if (
+    chain &&
+    chain.alchemyHost &&
+    env &&
+    typeof env.ALCHEMY_KEY === 'string' &&
+    env.ALCHEMY_KEY.trim() !== ''
+  ) {
+    return `https://${chain.alchemyHost}/v2/${env.ALCHEMY_KEY.trim()}`;
+  }
+  // (3) Public default endpoint.
   return chain ? chain.defaultRpcUrl : undefined;
 }
 
