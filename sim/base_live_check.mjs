@@ -30,6 +30,7 @@
  *
  * Usage: node sim/base_live_check.mjs [--minutes 60] [--every 20] [--sizes 1000]
  *        [--triangles 150] [--no-triangles] [--tokens 0xAddr,0xAddr]
+ *        [--focus cbETH/WETH]  only routes that use this pair: every 4 s, sizes $250/$1k/$5k/$20k
  *        RPC_URL=<your Base RPC> to use your own node (recommended for this size).
  */
 import fs from "node:fs";
@@ -37,9 +38,10 @@ import fs from "node:fs";
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf("--" + n); return i >= 0 ? args[i + 1] : d; };
 const MINUTES = Number(opt("minutes", 60));
-const EVERY_SEC = Number(opt("every", 20));
-const SIZES_USD = opt("sizes", "1000").split(",").map(Number);
-const TRI_PER_POLL = args.includes("--no-triangles") ? 0 : Number(opt("triangles", 150));
+const FOCUS = opt("focus", null) ? opt("focus").split("/").map((x) => x.trim()) : null; // e.g. --focus cbETH/WETH
+const EVERY_SEC = Number(opt("every", FOCUS ? 4 : 20));
+const SIZES_USD = opt("sizes", FOCUS ? "250,1000,5000,20000" : "1000").split(",").map(Number);
+let TRI_PER_POLL = args.includes("--no-triangles") ? 0 : Number(opt("triangles", 150));
 const MIN_PROFIT_BPS = Number(opt("min-profit-bps", 50));
 const GAS_UNITS_2 = 400000n, GAS_UNITS_3 = 550000n;
 const L1_FEE_USD = Number(opt("l1-fee-usd", "0.02"));
@@ -289,6 +291,18 @@ function buildRoutes() {
         if (x === q || y === q || x === y) continue;
         if (venues.has(pairKey(q, x)) && venues.has(pairKey(x, y)) && venues.has(pairKey(y, q))) triangles.push({ q, x, y });
     }
+    if (FOCUS) {
+        const [a, b] = FOCUS;
+        for (const s of FOCUS) if (!tok.has(s)) throw new Error(`--focus: token "${s}" not in the token list (names are case-sensitive; add others with --tokens 0xAddr).`);
+        const fk = pairKey(a, b);
+        const v = venues.get(fk) || [];
+        console.log(`\nFOCUS on ${a}/${b}: ${v.length} pools -> ${v.map((x) => x.name).join(", ") || "none"}`);
+        if (v.length < 1) throw new Error(`No pools found for ${a}/${b}.`);
+        twoStep = twoStep.filter((r) => pairKey(r.q, r.x) === fk);
+        triangles = triangles.filter((c) => [pairKey(c.q, c.x), pairKey(c.x, c.y), pairKey(c.y, c.q)].includes(fk));
+        if (TRI_PER_POLL > 0) TRI_PER_POLL = triangles.length; // check every focus triangle every poll
+        if (!twoStep.length) console.log("  (no 2-step route: neither token can be flash-borrowed from Aave, or only one pool exists)");
+    }
 }
 
 // ------------------------------------------------------------- pricing ----
@@ -402,7 +416,7 @@ async function poll() {
         const bestSellOther = sells[0];
         if (bestSellOther) {
             const desc = `${rq.r.q}->${rq.r.x}->${rq.r.q} $${rq.usd} ${buy.venue.name}->${bestSellOther.v.name}`;
-            results.push(record(`${rq.r.q}/${rq.r.x} 2-step`, "2-step", rq.r.q, rq.amt, bestSellOther.out, gasUsd2, desc, bn, passingNow));
+            results.push(record(`${rq.r.q}/${rq.r.x} 2-step${FOCUS ? " $" + rq.usd : ""}`, "2-step", rq.r.q, rq.amt, bestSellOther.out, gasUsd2, desc, bn, passingNow));
         }
         // if the best sell is on the same pool as the best buy, also try the 2nd-best buy venue
         if (h2[i].venue === buy.venue && buy.all.length >= 2) {
@@ -416,25 +430,26 @@ async function poll() {
             const s = h3[i].all.filter((x) => x.v !== t.buyV).sort((a, b) => (a.out > b.out ? -1 : 1))[0];
             if (!s) return;
             const desc = `${t.rq.r.q}->${t.rq.r.x}->${t.rq.r.q} $${t.rq.usd} ${t.buyV.name}->${s.v.name}`;
-            results.push(record(`${t.rq.r.q}/${t.rq.r.x} 2-step`, "2-step", t.rq.r.q, t.rq.amt, s.out, gasUsd2, desc, bn, passingNow));
+            results.push(record(`${t.rq.r.q}/${t.rq.r.x} 2-step${FOCUS ? " $" + t.rq.usd : ""}`, "2-step", t.rq.r.q, t.rq.amt, s.out, gasUsd2, desc, bn, passingNow));
         });
     }
 
     // ---- 3-step triangles (rotating subset each poll), best venue per step ----
     let triCount = 0;
     if (TRI_PER_POLL > 0 && triangles.length) {
-        const batch = [];
-        for (let k = 0; k < Math.min(TRI_PER_POLL, triangles.length); k++) batch.push(triangles[(triCursor + k) % triangles.length]);
-        triCursor = (triCursor + batch.length) % triangles.length;
-        const usd = SIZES_USD[0];
-        const t1 = await bestHop(batch.map((c) => ({ from: c.q, to: c.x, amt: amountFor(c.q, usd) })), tag);
+        const tris = [];
+        for (let k = 0; k < Math.min(TRI_PER_POLL, triangles.length); k++) tris.push(triangles[(triCursor + k) % triangles.length]);
+        triCursor = (triCursor + tris.length) % triangles.length;
+        const triSizes = FOCUS ? SIZES_USD : [SIZES_USD[0]];
+        const batch = tris.flatMap((c) => triSizes.map((usd) => ({ ...c, usd })));
+        const t1 = await bestHop(batch.map((c) => ({ from: c.q, to: c.x, amt: amountFor(c.q, c.usd) })), tag);
         const t2 = await bestHop(batch.map((c, i) => ({ from: c.x, to: c.y, amt: t1[i].out })), tag);
         const t3 = await bestHop(batch.map((c, i) => ({ from: c.y, to: c.q, amt: t2[i].out })), tag);
         batch.forEach((c, i) => {
             if (!t3[i].out) return;
             triCount++;
-            const desc = `${c.q}->${c.x}->${c.y}->${c.q} $${usd} ${t1[i].venue.name}/${t2[i].venue.name}/${t3[i].venue.name}`;
-            results.push(record(`${c.q}>${c.x}>${c.y} 3-step`, "3-step", c.q, amountFor(c.q, usd), t3[i].out, gasUsd3, desc, bn, passingNow));
+            const desc = `${c.q}->${c.x}->${c.y}->${c.q} $${c.usd} ${t1[i].venue.name}/${t2[i].venue.name}/${t3[i].venue.name}`;
+            results.push(record(`${c.q}>${c.x}>${c.y} 3-step${FOCUS ? " $" + c.usd : ""}`, "3-step", c.q, amountFor(c.q, c.usd), t3[i].out, gasUsd3, desc, bn, passingNow));
         });
     }
 
@@ -471,7 +486,7 @@ async function main() {
     await setup();
     buildRoutes();
     console.log(`Routes: ${twoStep.length} two-step pairs, ${triangles.length} triangles` +
-        (TRI_PER_POLL ? ` (checking ${Math.min(TRI_PER_POLL, triangles.length)} per poll, rotating)` : " (off)") + `. Aave flash fee: ${premiumBps} bps (live).`);
+        (!TRI_PER_POLL ? " (off)" : FOCUS ? " (all checked every poll)" : ` (checking ${Math.min(TRI_PER_POLL, triangles.length)} per poll, rotating)`) + `. Aave flash fee: ${premiumBps} bps (live).`);
     if (!twoStep.length && !triangles.length) throw new Error("No routes found.");
     if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,type,route,gap_bps,net_usd,profitable,passes_rule\n");
     console.log(`\nRunning ${MINUTES} min, checking every ${EVERY_SEC}s. Ctrl+C for the summary.\n`);

@@ -56,6 +56,7 @@ Options:
 | `--triangles` | 150 | triangles checked per poll |
 | `--no-triangles` | off | only check 2-step routes |
 | `--tokens 0xAddr,...` | none | extra tokens (their name is read from the chain) |
+| `--focus cbETH/WETH` | off | only routes that use this pair (2-step on its pools, plus every triangle through it), checked every 4 s at $250, $1k, $5k and $20k |
 
 This makes many requests, so if public servers start refusing them, use your own `RPC_URL`.
 
