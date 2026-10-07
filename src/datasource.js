@@ -53,11 +53,17 @@ export class RpcDataSource extends DataSource {
   /**
    * @param {{call: Function}} provider read-only provider (src/evm/rpc.js).
    * @param {object} config a config in the DEFAULT_CONFIG shape.
+   * @param {object} [options]
+   * @param {(msg:string)=>void} [options.onWarn] sink for non-fatal warnings
+   *   (e.g. a V2 leg skipped for lack of a pair address). Defaults to a no-op
+   *   so the scanner stays quiet unless a caller wires it up (the CLI routes it
+   *   to stderr). Injectable so tests can capture the signal.
    */
-  constructor(provider, config) {
+  constructor(provider, config, options = {}) {
     super();
     this.provider = provider;
     this.config = config;
+    this.onWarn = typeof options.onWarn === 'function' ? options.onWarn : () => {};
   }
 
   async getPairData(pair) {
@@ -98,11 +104,24 @@ export class RpcDataSource extends DataSource {
         // V2: read reserves for an exact mid-price and slippage depth. pair
         // address resolution is config-provided per DEX in a fuller build; here
         // we expect dex.pairs[`${base}/${quote}`] to carry the pair address.
+        //
+        // When no pair address is configured for this DEX we SKIP this leg
+        // rather than abort the whole pair. A reachable RPC can then still
+        // return the V3 quote (and any other priced leg) for the pair, so a
+        // live scan degrades to a one-sided but useful result instead of
+        // throwing a plain Error on the first pair. The scanner treats a pair
+        // with fewer than two priced legs as "no cross-DEX opportunity" and
+        // still surfaces it for trap-only visibility (see crossDexGap in
+        // src/scanner.js). The skip is announced via onWarn so the omission is
+        // an explicit signal, never a silent gap.
         const pairAddr = dex.pairs?.[`${pair.base}/${pair.quote}`];
         if (!pairAddr) {
-          throw new Error(
-            `RpcDataSource: no ${dex.name} pair address for ${pair.base}/${pair.quote}`,
+          this.onWarn(
+            `RpcDataSource: skipping ${dex.name} leg for ${pair.base}/${pair.quote} ` +
+              `(no V2 pair address configured for ${dex.name}); reporting the ` +
+              'remaining leg(s) only.',
           );
+          continue;
         }
         const { reserve0, reserve1 } = await readV2Reserves(this.provider, pairAddr);
         const { price } = priceFromReservesV2(

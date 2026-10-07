@@ -166,9 +166,9 @@ key), then pass it as the explicit override shown above.
 
 ## Per-chain DEX pairs
 
-Each chain compares exactly two DEXes (one `v3` quoter-style, one `v2`
-reserves-style) over its curated token pairs. The scanning pipeline is identical
-across chains; only the config differs.
+Each chain pairs one `v3` quoter-style DEX against one `v2` reserves-style DEX
+over its curated token pairs. The scanning pipeline is identical across chains;
+only the config differs.
 
 | Chain          | DEXes compared                  | Default curated pairs (base/quote)              |
 | -------------- | ------------------------------- | ----------------------------------------------- |
@@ -180,6 +180,19 @@ Base pairs are quoted in USDC, BSC pairs in USDT, and Arbitrum pairs in USDC.
 The curated lists are majors plus a couple of liquid mid-caps per chain (for
 example AERO/DEGEN on Base, CAKE on BSC, GMX on Arbitrum). Override the scanned
 pairs for any chain with `--pairs "WBNB/USDT,CAKE/USDT"`.
+
+### What a live scan reads today
+
+The `v3` leg (Uniswap V3, PancakeSwap V3) reads a live quote directly from the
+on-chain quoter, so it needs no extra setup. The `v2` leg (Aerodrome,
+PancakeSwap V2, Camelot) reads reserves from a specific pair contract, so it
+needs that pair's address in the per-DEX `pairs` map in `src/config/dexes.js`.
+The shipped config leaves those `pairs` maps empty, so a live scan reads the
+`v3` quote and gracefully skips the `v2` leg, printing a one-line
+`Warning: skipping <DEX> leg ...` to stderr and still reporting the pair. A full
+two-DEX comparison for a pair becomes live once you add that pair's `v2` pair
+address to the DEX's `pairs` map. Offline runs (`--offline`) are unaffected: the
+bundled fixture carries both legs, so the demo shows a complete comparison.
 
 ## CLI options
 
