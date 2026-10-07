@@ -31,17 +31,33 @@ actually exist on them.
 Differences from the original, all in the bot's favour: all routes are quoted in one pass per block, there are
 no competing bots, and gas is estimated from a model rather than the deployed contract.
 
-## 2. Base: many tokens, Uniswap V3 vs Aerodrome
+## 2. Base: 25 tokens, 7 DEXes, 2-step and 3-step (triangle) routes
 
 ```sh
 node sim/base_live_check.mjs --minutes 60
 ```
 
-This checks real round trips (borrow USDC or WETH → buy a token on one exchange → sell it on another) for WETH, USDC,
-USDbC, DAI, USDT, cbETH, wstETH, cbBTC, AERO, DEGEN, BRETT and VIRTUAL. It compares every Uniswap V3 fee level with
-Aerodrome's volatile and stable pools, at $1k and $10k (`--sizes`), and subtracts the live Aave fee and gas. Each
-token's name is checked on-chain at startup, and any mismatch is skipped. Options: `--every 12` (seconds between
-checks) and `--min-profit-bps 50`.
+This checks real quotes on Uniswap V3, PancakeSwap V3, SushiSwap V3, Aerodrome (volatile, stable, and Slipstream
+concentrated-liquidity pools), Uniswap V2 and BaseSwap. It covers every pool between 25 tokens: stablecoins, ETH and
+staked-ETH tokens, BTC tokens, and AERO, MORPHO, VIRTUAL, DEGEN, BRETT and more.
+
+- **2-step routes:** borrow any token Aave lends on Base, buy on the best exchange, sell on the best *other* exchange.
+- **3-step triangles:** borrow Q → X → Y → Q, using the best exchange for each step. A rotating 150 are checked per poll.
+
+The live Aave fee and gas are subtracted. Exchanges and tokens are checked on-chain at startup, and any that don't
+check out are skipped.
+
+Options:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--every` | 20 | seconds between checks |
+| `--sizes` | 1000 | trade sizes in USD, e.g. `1000,10000` |
+| `--triangles` | 150 | triangles checked per poll |
+| `--no-triangles` | off | only check 2-step routes |
+| `--tokens 0xAddr,...` | none | extra tokens (their name is read from the chain) |
+
+This makes many requests, so if public servers start refusing them, use your own `RPC_URL`.
 
 ## 3. Simple live check on Ethereum (two-step routes, several loan sizes)
 
