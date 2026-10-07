@@ -485,8 +485,9 @@ function summary() {
 async function main() {
     await setup();
     buildRoutes();
-    console.log(`Routes: ${twoStep.length} two-step pairs, ${triangles.length} triangles` +
-        (!TRI_PER_POLL ? " (off)" : FOCUS ? " (all checked every poll)" : ` (checking ${Math.min(TRI_PER_POLL, triangles.length)} per poll, rotating)`) + `. Aave flash fee: ${premiumBps} bps (live).`);
+    console.log(`Routes: ${twoStep.length} two-step pairs, ` +
+        (!TRI_PER_POLL ? "triangles OFF" : `${triangles.length} triangles` + (FOCUS ? " (all checked every poll)" : ` (checking ${Math.min(TRI_PER_POLL, triangles.length)} per poll, rotating)`)) +
+        `. Aave flash fee: ${premiumBps} bps (live).` + (FOCUS ? ` Focus: ${FOCUS.join("/")}, sizes $${SIZES_USD.join(", $")}, every ${EVERY_SEC}s.` : ""));
     if (!twoStep.length && !triangles.length) throw new Error("No routes found.");
     if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,type,route,gap_bps,net_usd,profitable,passes_rule\n");
     console.log(`\nRunning ${MINUTES} min, checking every ${EVERY_SEC}s. Ctrl+C for the summary.\n`);
