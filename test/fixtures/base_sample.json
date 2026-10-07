@@ -1,0 +1,137 @@
+{
+  "chain": "Base",
+  "chainId": 8453,
+  "description": "Synthetic two-DEX (Uniswap V3 vs Aerodrome) snapshot over curated Base majors. Values are plausible but hand-crafted to exercise every scanner outcome: one profitable-after-costs pair, one positive-raw-gap-but-negative-net pair, one fee-on-transfer trap, one sell-blocked trap, and one thin/one-sided-liquidity pair.",
+  "pairs": [
+    {
+      "base": "WETH",
+      "quote": "USDC",
+      "decimalsBase": 18,
+      "decimalsQuote": 6,
+      "note": "Genuinely profitable after costs: 1% raw gap beats 35bps fees + gas.",
+      "dexes": [
+        { "name": "UniswapV3", "kind": "v3", "feeBps": 5, "price": 3000.0 },
+        {
+          "name": "Aerodrome",
+          "kind": "v2",
+          "feeBps": 30,
+          "price": 3030.0,
+          "reserveBase": "4000000000000000000000",
+          "reserveQuote": "12120000000000"
+        }
+      ],
+      "sell": {
+        "sellReverted": false,
+        "simulatedSellOut": "3030000000",
+        "expectedOut": "3030000000",
+        "simulatedOut": "3030000000"
+      },
+      "liquidity": 24240000,
+      "poolCount": 2
+    },
+    {
+      "base": "cbETH",
+      "quote": "WETH",
+      "decimalsBase": 18,
+      "decimalsQuote": 18,
+      "note": "Positive raw gap (~0.095%) but net goes negative after 35bps fees + gas.",
+      "dexes": [
+        { "name": "UniswapV3", "kind": "v3", "feeBps": 5, "price": 1.05 },
+        {
+          "name": "Aerodrome",
+          "kind": "v2",
+          "feeBps": 30,
+          "price": 1.051,
+          "reserveBase": "2000000000000000000000",
+          "reserveQuote": "2102000000000000000000"
+        }
+      ],
+      "sell": {
+        "sellReverted": false,
+        "simulatedSellOut": "1051000000000000000",
+        "expectedOut": "1051000000000000000",
+        "simulatedOut": "1051000000000000000"
+      },
+      "liquidity": 6306000,
+      "poolCount": 2
+    },
+    {
+      "base": "DAI",
+      "quote": "USDC",
+      "decimalsBase": 18,
+      "decimalsQuote": 6,
+      "note": "Fee-on-transfer trap: simulated sell output is 10% short of expected.",
+      "dexes": [
+        { "name": "UniswapV3", "kind": "v3", "feeBps": 5, "price": 1.0 },
+        {
+          "name": "Aerodrome",
+          "kind": "v2",
+          "feeBps": 30,
+          "price": 1.02,
+          "reserveBase": "5000000000000000000000000",
+          "reserveQuote": "5100000000000"
+        }
+      ],
+      "sell": {
+        "sellReverted": false,
+        "simulatedSellOut": "900000",
+        "expectedOut": "1000000",
+        "simulatedOut": "900000"
+      },
+      "liquidity": 10200000,
+      "poolCount": 2
+    },
+    {
+      "base": "USDT",
+      "quote": "USDC",
+      "decimalsBase": 6,
+      "decimalsQuote": 6,
+      "note": "Sell-blocked honeypot: the simulated sell reverts, so it is non-sellable.",
+      "dexes": [
+        { "name": "UniswapV3", "kind": "v3", "feeBps": 5, "price": 1.0 },
+        {
+          "name": "Aerodrome",
+          "kind": "v2",
+          "feeBps": 30,
+          "price": 1.03,
+          "reserveBase": "3000000000000",
+          "reserveQuote": "3090000000000"
+        }
+      ],
+      "sell": {
+        "sellReverted": true,
+        "simulatedSellOut": "0",
+        "expectedOut": "1000000",
+        "simulatedOut": "0"
+      },
+      "liquidity": 6090000,
+      "poolCount": 2
+    },
+    {
+      "base": "USDC",
+      "quote": "WETH",
+      "decimalsBase": 6,
+      "decimalsQuote": 18,
+      "note": "Thin / one-sided liquidity: tiny pool depth and skewed reserves.",
+      "dexes": [
+        { "name": "UniswapV3", "kind": "v3", "feeBps": 5, "price": 0.00033 },
+        {
+          "name": "Aerodrome",
+          "kind": "v2",
+          "feeBps": 30,
+          "price": 0.00034,
+          "reserveBase": "6000000000",
+          "reserveQuote": "660000000000000"
+        }
+      ],
+      "sell": {
+        "sellReverted": false,
+        "simulatedSellOut": "330000000000000",
+        "expectedOut": "330000000000000",
+        "simulatedOut": "330000000000000"
+      },
+      "liquidity": 2000,
+      "poolCount": 1
+    }
+  ]
+}
