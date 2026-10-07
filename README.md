@@ -8,7 +8,10 @@ It also runs a honeypot/trap filter on each token and ranks the results.
 
 Default target: **Base** (chainId 8453), comparing **Uniswap V3** and
 **Aerodrome**, over a small curated token list of majors plus a couple of liquid
-mid-caps.
+mid-caps. **BNB Smart Chain** (`--chain bsc`) and **Arbitrum One**
+(`--chain arbitrum`) are now first-class live targets too, each with its own
+curated token list and DEX pair. Base remains the default when `--chain` is
+omitted.
 
 ---
 
@@ -70,11 +73,12 @@ output.
 
 ### Live usage
 
-Point it at a live Base RPC endpoint. By default it uses a free public endpoint;
-you can override with an environment variable or supply an Alchemy key:
+Point it at a live RPC endpoint for the chain you want to scan. By default it
+uses that chain's free public endpoint; you can override with an environment
+variable or supply an Alchemy key:
 
 ```sh
-# Free public endpoint (default)
+# Free public endpoint (default, Base)
 node bin/arbitai.js
 
 # Explicit RPC URL
@@ -89,6 +93,93 @@ node bin/arbitai.js --rpc https://mainnet.base.org
 
 If the network is unreachable, ArbitAI prints a clear, actionable error (never a
 raw stack trace) and exits non-zero, suggesting `--offline`.
+
+#### Live scan per chain
+
+Each chain selects its own quote currency, curated token list, DEX pair, and a
+free public RPC endpoint used when no key is supplied:
+
+```sh
+# Base (default): quoted in USDC, public RPC https://mainnet.base.org
+node bin/arbitai.js --chain base
+
+# BNB Smart Chain: quoted in USDT, public RPC https://bsc-dataseed.binance.org
+node bin/arbitai.js --chain bsc
+
+# Arbitrum One: quoted in USDC, public RPC https://arb1.arbitrum.io/rpc
+node bin/arbitai.js --chain arbitrum
+```
+
+| Chain          | `--chain` key | Quote | Default public RPC                     |
+| -------------- | ------------- | ----- | -------------------------------------- |
+| Base           | `base`        | USDC  | `https://mainnet.base.org`             |
+| BNB Smart Chain| `bsc`         | USDT  | `https://bsc-dataseed.binance.org`     |
+| Arbitrum One   | `arbitrum`    | USDC  | `https://arb1.arbitrum.io/rpc`         |
+
+Public endpoints are rate-limited and best-effort. For reliable live scans,
+supply your own free key (see below).
+
+#### Supplying a free RPC / Alchemy key
+
+Nothing is hardcoded and no key is ever stored: the RPC URL is resolved from the
+environment (or the CLI flag) at the start of each run and used only for
+read calls. The resolution priority per chain is:
+
+1. `RPC_URL=<url>` or `--rpc <url>`: an explicit override, highest priority,
+   used verbatim for any chain or provider.
+2. `ALCHEMY_KEY=<your_key>`: composes the chain-correct Alchemy endpoint.
+3. The chain's public default endpoint (no key required).
+
+```sh
+# Explicit override (highest priority): works for any provider, incl. Infura
+RPC_URL=https://arb-mainnet.g.alchemy.com/v2/your_key node bin/arbitai.js --chain arbitrum
+RPC_URL=https://arbitrum-mainnet.infura.io/v3/your_key node bin/arbitai.js --chain arbitrum
+
+# Per-invocation CLI override (same priority as RPC_URL)
+node bin/arbitai.js --chain bsc --rpc https://bsc-mainnet.infura.io/v3/your_key
+
+# ALCHEMY_KEY composes the chain-correct Alchemy host automatically
+ALCHEMY_KEY=your_key_here node bin/arbitai.js --chain base      # base-mainnet.g.alchemy.com
+ALCHEMY_KEY=your_key_here node bin/arbitai.js --chain bsc       # bnb-mainnet.g.alchemy.com
+ALCHEMY_KEY=your_key_here node bin/arbitai.js --chain arbitrum  # arb-mainnet.g.alchemy.com
+```
+
+The per-chain Alchemy hostnames composed from `ALCHEMY_KEY` are:
+
+| Chain          | Alchemy host                 |
+| -------------- | ---------------------------- |
+| Base           | `base-mainnet.g.alchemy.com` |
+| BNB Smart Chain| `bnb-mainnet.g.alchemy.com`  |
+| Arbitrum One   | `arb-mainnet.g.alchemy.com`  |
+
+**Getting a free Alchemy key:** sign up at
+[alchemy.com](https://www.alchemy.com/), create an app for the network you want
+(Base, BNB Smart Chain, or Arbitrum), and copy the API key from the app
+dashboard. Pass it as `ALCHEMY_KEY` and ArbitAI composes the correct endpoint
+for you.
+
+**Using Infura (or any other provider):** Infura endpoints are not composed from
+`ALCHEMY_KEY`; supply the full Infura URL via `RPC_URL` or `--rpc` instead. Sign
+up at [infura.io](https://www.infura.io/), create a project, enable the network
+you want, and copy the full HTTPS endpoint (it already includes your project
+key), then pass it as the explicit override shown above.
+
+## Per-chain DEX pairs
+
+Each chain compares exactly two DEXes (one `v3` quoter-style, one `v2`
+reserves-style) over its curated token pairs. The scanning pipeline is identical
+across chains; only the config differs.
+
+| Chain          | DEXes compared                  | Default curated pairs (base/quote)              |
+| -------------- | ------------------------------- | ----------------------------------------------- |
+| Base           | Uniswap V3 vs Aerodrome         | WETH/USDC, cbETH/WETH, DAI/USDC, USDT/USDC, USDC/WETH |
+| BNB Smart Chain| PancakeSwap V3 vs PancakeSwap V2| WBNB/USDT, ETH/USDT, CAKE/USDT                  |
+| Arbitrum One   | Uniswap V3 vs Camelot           | WETH/USDC, ARB/USDC, GMX/USDC                   |
+
+Base pairs are quoted in USDC, BSC pairs in USDT, and Arbitrum pairs in USDC.
+The curated lists are majors plus a couple of liquid mid-caps per chain (for
+example AERO/DEGEN on Base, CAKE on BSC, GMX on Arbitrum). Override the scanned
+pairs for any chain with `--pairs "WBNB/USDT,CAKE/USDT"`.
 
 ## CLI options
 
@@ -190,11 +281,20 @@ Everything is config-driven under `src/config/`:
 - `src/config/index.js` — `buildConfig()` composes a run-ready config and applies
   env/CLI overrides.
 
-To scan a different chain, uncomment the provided **BSC / PancakeSwap** and
-**Arbitrum / Camelot** stub blocks in those three files (they show the exact
-shape), register the chain in `CHAINS`, and run with `--chain bsc` or
-`--chain arbitrum`. Nothing in the scanning pipeline needs to change — the DEX
-read style (`v3` quoter vs `v2` reserves) is selected from config.
+Base, **BSC / PancakeSwap**, and **Arbitrum / Camelot** are all registered and
+live out of the box; run them with `--chain base`, `--chain bsc`, or
+`--chain arbitrum`. To add a brand-new chain, add a descriptor to `CHAINS` in
+`chains.js`, a DEX set in `dexes.js`, and a curated token list plus default
+pairs in `tokens.js` (the existing three chains show the exact shape). Nothing
+in the scanning pipeline needs to change: the DEX read style (`v3` quoter vs
+`v2` reserves) is selected from config.
+
+Across every chain the tool stays **strictly read-only**: it performs view
+reads only, holds no keys and no wallet, and never submits or signs a
+transaction. If a chain's public RPC endpoint is unreachable, ArbitAI degrades
+to a clear, actionable error (never a raw stack trace), exits non-zero, and
+hints at `--offline` so you can still exercise the full pipeline against bundled
+fixtures.
 
 To scan different pairs without editing config, use `--pairs "WETH/USDC,DAI/USDC"`.
 
