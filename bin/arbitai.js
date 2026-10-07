@@ -128,7 +128,12 @@ async function main() {
     dataSource = new FixtureDataSource(fixtureJson);
   } else {
     const provider = new JsonRpcProvider(config.rpcUrl);
-    dataSource = new RpcDataSource(provider, config);
+    // Route non-fatal data-source warnings (e.g. a V2 leg skipped for lack of a
+    // configured pair address) to stderr so --json stdout stays clean and the
+    // user sees why a pair came back one-sided.
+    dataSource = new RpcDataSource(provider, config, {
+      onWarn: (msg) => process.stderr.write(`Warning: ${msg}\n`),
+    });
   }
 
   const ranked = await scan(config, dataSource);
