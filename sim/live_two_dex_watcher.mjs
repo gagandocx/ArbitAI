@@ -1,28 +1,53 @@
 #!/usr/bin/env node
 /*
- * LIVE TWO-DEX WATCHER (watch-only) — one pair, two pools, on Base.
+ * LIVE TWO-/THREE-DEX WATCHER (watch-only) — one pair across several DEX pools, on Base.
  *
- * Watches the single most-arbitraged pair the recon found on Base — USDC/WETH on
- * the two hotspot pools — and every new block computes, from REAL on-chain quotes:
- *   borrow USDC -> buy WETH on pool A -> sell WETH on pool B -> USDC   (and B->A)
+ * Primary use case: a DEEP major pair — WETH/USDC — traded on the SAME two tokens
+ * across multiple DEXes (Uniswap V3, PancakeSwap V3, SushiSwap V3 on Base). Every
+ * new block it computes, from REAL on-chain quotes, a clean 2-leg cross-DEX loop:
+ *   USDC -> buy WETH on DEX A -> sell WETH on DEX B -> USDC   (and the reverse B->A)
  * at several trade sizes, keeps the best, subtracts the live gas cost, and logs a
  * "WOULD-FIRE" signal whenever a flash-loan cycle would net > threshold.
  *
+ * TWO shapes are supported, auto-detected from each pool's token0/token1:
+ *   • SAME-PAIR mode  — both pools share BOTH tokens (e.g. WETH & USDC). This is the
+ *     clean cross-DEX arb: the quote is the stablecoin (USDC, ~$1), the base is the
+ *     other token (WETH, 18 dec, NOT ~$1). There is NO 3rd stable leg, so no haircut.
+ *     Base-token decimals are read from chain (not assumed 18).
+ *   • ONE-SHARED-TOKEN mode (legacy B3 style) — the two pools share exactly one base
+ *     token traded against two different stable quotes (e.g. B3/USDC vs B3/USDT). The
+ *     cycle ends in the "wrong" stable, so a conservative cross-stable 3rd-leg haircut
+ *     is charged. This behavior is unchanged.
+ *
+ * THREE-DEX coverage: pass --poolC in addition to --poolA/--poolB and, when all three
+ * share the same pair, the watcher evaluates all three DEX pairings per block
+ * (A<->B, A<->C, B<->C) and reports the best net, labeling which DEX pair fired. When
+ * --poolC is omitted it behaves exactly as before (A<->B only).
+ *
  * It fires NOTHING. No wallet, no key material, no transactions. It only answers:
- * "how often does a real, above-cost two-DEX gap actually open on this pair?"
+ * "how often does a real, above-cost cross-DEX gap actually open on this pair?"
  * That is the make-or-break number to measure BEFORE risking a cent.
  *
- * SAFETY: read-only (eth_blockNumber / eth_call / eth_gasPrice / eth_chainId).
+ * SAFETY: read-only (eth_blockNumber / eth_call / eth_gasPrice / eth_chainId only).
  * Requirements: Node 18+. Use your Alchemy Base URL (RPC_URL) — public RPCs
  * rate-limit the per-block quoting.
  *
+ * POOL ADDRESSES ARE NOT HARDCODED FOR WETH/USDC. The three real Base WETH/USDC pool
+ * addresses (Uniswap V3, PancakeSwap V3, SushiSwap V3) must be supplied by YOU from
+ * DEX Screener (https://dexscreener.com/base , search "WETH USDC"). The defaults below
+ * are the legacy one-shared-token (B3) example and keep that path working; override
+ * them for the WETH/USDC cross-DEX run.
+ *
  * Usage:
  *   set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
- *   node sim/live_two_dex_watcher.mjs --minutes 60
+ *   # WETH/USDC across three DEXes (addresses from DEX Screener):
+ *   node sim/live_two_dex_watcher.mjs --minutes 60 \
+ *        --poolA 0xUNISWAP_V3_WETH_USDC --poolB 0xPANCAKE_V3_WETH_USDC --poolC 0xSUSHI_V3_WETH_USDC
  *   Options: --min-profit-usd 0.10  --sizes 1000,5000,20000,100000
- *            --poolA 0x..  --poolB 0x..  --quoter 0x..  (override the defaults)
+ *            --poolA 0x..  --poolB 0x..  --poolC 0x..  --quoter 0x..  (override the defaults)
  */
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf("--" + n); return i >= 0 ? args[i + 1] : d; };
@@ -35,14 +60,18 @@ const LOG_FILE = opt("log", "two_dex_watch.csv");
 const RPCS = process.env.RPC_URL ? [process.env.RPC_URL]
     : ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://1rpc.io/base"];
 
-// ---- the proven hotspot pools on Base (the token 0x07b3… = B3, vs USDC & USDT) ----
-// The watcher AUTO-DETECTS each pool's tokens, so it works for any two pools that
-// share a common "base" token traded against two (possibly different) quote tokens.
+// ---- proven hotspot pools on Base (legacy B3 one-shared-token example) ----
+// For the WETH/USDC cross-DEX use case these MUST be overridden with the three real
+// Base pool addresses (Uniswap V3, PancakeSwap V3, SushiSwap V3) from DEX Screener —
+// they are deliberately NOT hardcoded here. The watcher AUTO-DETECTS each pool's
+// tokens, so it works both for two pools sharing BOTH tokens (SAME-PAIR mode) and for
+// two pools sharing one base token against two quotes (legacy ONE-SHARED-TOKEN mode).
 const lower = (a) => a.toLowerCase();
 const QUOTER = lower(opt("quoter", "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")); // Uniswap QuoterV2 on Base
-const POOL_A = lower(opt("poolA", "0xf411dbf5978ce4089cf40ef7b83f813efd312fb0")); // #1 arbitraged pool (B3/USDT)
-const POOL_B = lower(opt("poolB", "0x2df380544b88adb3ad0a94100dcc45fd705aae2d")); // #2 arbitraged pool (B3/USDC)
-// stablecoins we treat as ~$1 and freely convertible (for the quote-token leg)
+const POOL_A = lower(opt("poolA", "0xf411dbf5978ce4089cf40ef7b83f813efd312fb0")); // legacy #1 pool (B3/USDT)
+const POOL_B = lower(opt("poolB", "0x2df380544b88adb3ad0a94100dcc45fd705aae2d")); // legacy #2 pool (B3/USDC)
+const POOL_C = opt("poolC", null) ? lower(opt("poolC", null)) : null;            // optional 3rd DEX pool (WETH/USDC)
+// stablecoins we treat as ~$1 and freely convertible (used to pick the quote leg)
 const STABLES = new Set([
     lower("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC
     lower("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"), // USDT
@@ -82,102 +111,195 @@ const strip = (h) => (h || "").replace(/^0x/, "");
 const word = (v) => BigInt(v).toString(16).padStart(64, "0");
 const aw = (a) => strip(a).toLowerCase().padStart(64, "0");
 const firstUint = (hex) => (hex && hex !== "0x" ? BigInt("0x" + strip(hex).slice(0, 64)) : null);
+const addrW = (hex) => "0x" + strip(hex).slice(24).toLowerCase();
 
 // QuoterV2.quoteExactInputSingle((tokenIn,tokenOut,amountIn,fee,sqrtPriceLimitX96)) -> amountOut
-function quoteCall(tokenIn, tokenOut, amountIn, fee, blockTag) {
+function quoteCall(tokenIn, tokenOut, amountIn, fee, blockTag, quoter = QUOTER) {
     const data = SEL.quote + aw(tokenIn) + aw(tokenOut) + word(amountIn) + word(fee) + word(0);
-    return ["eth_call", [{ to: QUOTER, data }, blockTag]];
+    return ["eth_call", [{ to: quoter, data }, blockTag]];
 }
 
-// ----------------------------------------------------- setup ----
-// Auto-detected: the shared "base" token (e.g. B3) and each pool's quote token.
-let BASE_TOK = null, QA = null, QB = null;        // base token, pool-A quote, pool-B quote
-let feeA = 0, feeB = 0, decQA = 6, decQB = 6, baseUsd = 0;
-const addrW = (hex) => "0x" + strip(hex).slice(24).toLowerCase();
+// ----------------------------------------------------- pool loading ----
+// Read a single pool's token0/token1/fee. Returns { addr, t0, t1, fee }.
+async function loadPool(addr, batchFn = batch) {
+    const [t0, t1, f] = await batchFn([
+        ["eth_call", [{ to: addr, data: SEL.token0 }, "latest"]],
+        ["eth_call", [{ to: addr, data: SEL.token1 }, "latest"]],
+        ["eth_call", [{ to: addr, data: SEL.fee }, "latest"]],
+    ]);
+    const fee = Number(firstUint(f) ?? 0n);
+    if (!fee) throw new Error(`Could not read fee for pool ${addr} (is the address right?).`);
+    return { addr: lower(addr), t0: addrW(t0), t1: addrW(t1), fee };
+}
+
+// Read an ERC-20 token's decimals from chain (NOT assumed). Returns a Number.
+async function tokenDecimals(token, batchFn = batch, dflt = 18) {
+    const [d] = await batchFn([["eth_call", [{ to: token, data: SEL.decimals }, "latest"]]]);
+    return Number(firstUint(d) ?? BigInt(dflt));
+}
+
+// ----------------------------------------------------- shape detection ----
+// Classify a PAIR of loaded pools into a cycle plan.
+//   intersection of {t0,t1} == 2  -> SAME-PAIR mode (both tokens shared).
+//     quote = the stablecoin (STABLES); base = the other (e.g. WETH, read decimals).
+//     NO cross-stable 3rd leg -> haircut 0.
+//   intersection == 1             -> ONE-SHARED-TOKEN mode (legacy B3 style).
+//     base = the shared token; QA/QB = each pool's own quote; charge cross-stable
+//     haircut when QA !== QB.
+//   otherwise                     -> throw a clear error.
+// Returns a plain plan object; decimals are filled in via decimalsFn (chain reads).
+async function detectShape(poolX, poolY, { decimalsFn, stables = STABLES } = {}) {
+    const setY = new Set([poolY.t0, poolY.t1]);
+    const shared = [poolX.t0, poolX.t1].filter((t) => setY.has(t));
+
+    if (shared.length === 2) {
+        // SAME-PAIR: both tokens shared. Pick the stablecoin as the quote.
+        const tokens = [poolX.t0, poolX.t1];
+        const stableTok = tokens.find((t) => stables.has(t));
+        const quote = stableTok ?? tokens[1]; // if neither known-stable, fall back; caller warns
+        const base = tokens.find((t) => t !== quote);
+        const decBase = decimalsFn ? await decimalsFn(base) : 18;
+        const decQuote = decimalsFn ? await decimalsFn(quote) : 18;
+        return {
+            mode: "SAME_PAIR",
+            base, quote,
+            QA: quote, QB: quote,              // both legs priced in the same stable
+            decQA: decQuote, decQB: decQuote,
+            decBase,
+            crossStable: false,                // same stable both sides -> NO haircut
+            quoteIsStable: stables.has(quote),
+        };
+    }
+
+    if (shared.length === 1) {
+        // ONE-SHARED-TOKEN (legacy B3): base is the shared token; each pool keeps its quote.
+        const base = shared[0];
+        const QA = poolX.t0 === base ? poolX.t1 : poolX.t0;
+        const QB = poolY.t0 === base ? poolY.t1 : poolY.t0;
+        const decQA = decimalsFn ? await decimalsFn(QA) : 18;
+        const decQB = decimalsFn ? await decimalsFn(QB) : 18;
+        const decBase = decimalsFn ? await decimalsFn(base) : 18;
+        return {
+            mode: "ONE_SHARED",
+            base, quote: QA,
+            QA, QB,
+            decQA, decQB,
+            decBase,
+            crossStable: QA !== QB,            // different quotes -> cross-stable 3rd leg
+            quoteIsStable: stables.has(QA) && stables.has(QB),
+        };
+    }
+
+    throw new Error(
+        `Pools do not share one or both tokens (X=${poolX.t0},${poolX.t1} Y=${poolY.t0},${poolY.t1}). ` +
+        `Pass pools of the SAME pair (both tokens) or the SAME base token vs two quotes.`);
+}
+
+// ----------------------------------------------------- cycle math ----
+// Compute the best net USD for a cross-DEX cycle between poolX (fee+quoter) and poolY,
+// given a `plan` from detectShape(). Direction X->Y = buy BASE on X, sell BASE on Y for
+// the quote; Y->X is the reverse. Net USD = quote_out (quote ~ $1) - startUsd, minus the
+// cross-stable 3rd-leg haircut (0 in SAME-PAIR mode). Uses QuoterV2 for exact amounts.
+//
+// `quoteFn(tokenIn, tokenOut, amountIn, fee, quoter)` returns amountOut as BigInt|null.
+// This indirection makes the math testable against an in-process mock RPC.
+async function cycleOut(startUsd, plan, poolX, poolY, { quoteFn, stableLegBps = 5 } = {}) {
+    const { base, QA, QB, decQA, decQB } = plan;
+    const feeX = poolX.fee, feeY = poolY.fee;
+    const quoterX = poolX.quoter ?? QUOTER, quoterY = poolY.quoter ?? QUOTER;
+
+    // amounts in each quote's own decimals (quote assumed ~$1 stable)
+    const inX = BigInt(Math.round(startUsd * 10 ** decQB)); // start with QB (pool-X quote spent on X)
+    const inY = BigInt(Math.round(startUsd * 10 ** decQA)); // start with QA (pool-Y quote spent on Y)
+
+    // leg 1 of each direction: buy BASE
+    const baseFromX = await quoteFn(QB, base, inX, feeX, quoterX); // dir X->Y: buy BASE on X with QB
+    const baseFromY = await quoteFn(QA, base, inY, feeY, quoterY); // dir Y->X: buy BASE on Y with QA
+
+    // leg 2 of each direction: sell BASE back into the quote on the OTHER pool
+    const outX = baseFromX != null ? await quoteFn(base, QA, baseFromX, feeY, quoterY) : null; // sell on Y -> QA
+    const outY = baseFromY != null ? await quoteFn(base, QB, baseFromY, feeX, quoterX) : null; // sell on X -> QB
+
+    // cross-stable 3rd-leg haircut: only in ONE-SHARED-TOKEN mode where QA !== QB.
+    // In SAME-PAIR mode plan.crossStable is false -> haircut is 0.
+    const haircut = (usd) => (plan.crossStable ? (usd * stableLegBps) / 10000 : 0);
+
+    let best = null;
+    // dir X->Y: started with startUsd of QB, ended with QA out
+    if (baseFromX != null && outX != null) {
+        const outUsd = Number(outX) / 10 ** decQA; // QA ~ $1
+        best = { dir: "A->B", net: outUsd - startUsd - haircut(outUsd) };
+    }
+    // dir Y->X: started with startUsd of QA, ended with QB out
+    if (baseFromY != null && outY != null) {
+        const outUsd = Number(outY) / 10 ** decQB; // QB ~ $1
+        const net2 = outUsd - startUsd - haircut(outUsd);
+        if (!best || net2 > best.net) best = { dir: "B->A", net: net2 };
+    }
+    // price BASE in USD (from pool-Y buy quote) for gas conversion / display — use the
+    // base token's REAL decimals from the plan (NOT a hardcoded 10**18).
+    if (baseFromY != null && baseFromY > 0n) {
+        best = best || null;
+        if (best) best.baseUsd = startUsd / (Number(baseFromY) / 10 ** plan.decBase);
+    }
+    return best; // { dir, net(USD, pre-gas) } or null
+}
+
+// A production quoteFn bound to the real RPC batch(). Returns amountOut (BigInt) or null.
+function makeLiveQuoteFn(blockTag) {
+    return async (tokenIn, tokenOut, amountIn, fee, quoter) => {
+        const [r] = await batch([quoteCall(tokenIn, tokenOut, amountIn, fee, blockTag, quoter)]);
+        return firstUint(r);
+    };
+}
+
+// ----------------------------------------------------- runtime state ----
+// Loaded pools + the per-pairing plans, built once in discover().
+const RUNTIME = { pools: [], pairings: [] };
 
 async function discover() {
     const chainId = await rpc("eth_chainId", []);
     if (chainId !== "0x2105") throw new Error(`Expected Base (0x2105), got ${chainId}. Point RPC_URL at Base.`);
-    const [t0a, t1a, fa, t0b, t1b, fb] = await batch([
-        ["eth_call", [{ to: POOL_A, data: SEL.token0 }, "latest"]],
-        ["eth_call", [{ to: POOL_A, data: SEL.token1 }, "latest"]],
-        ["eth_call", [{ to: POOL_A, data: SEL.fee }, "latest"]],
-        ["eth_call", [{ to: POOL_B, data: SEL.token0 }, "latest"]],
-        ["eth_call", [{ to: POOL_B, data: SEL.token1 }, "latest"]],
-        ["eth_call", [{ to: POOL_B, data: SEL.fee }, "latest"]],
-    ]);
-    const a0 = addrW(t0a), a1 = addrW(t1a), b0 = addrW(t0b), b1 = addrW(t1b);
-    feeA = Number(firstUint(fa) ?? 0n); feeB = Number(firstUint(fb) ?? 0n);
-    if (!feeA || !feeB) throw new Error("Could not read pool fees (is the --quoter / pool address right?).");
 
-    // the base token is the one both pools share
-    const setB = new Set([b0, b1]);
-    const shared = [a0, a1].filter((t) => setB.has(t));
-    if (shared.length !== 1) throw new Error(`Pools do not share exactly one token (A=${a0},${a1} B=${b0},${b1}). Pass two pools of the SAME base token vs two quotes.`);
-    BASE_TOK = shared[0];
-    QA = a0 === BASE_TOK ? a1 : a0;   // pool-A quote token
-    QB = b0 === BASE_TOK ? b1 : b0;   // pool-B quote token
+    const addrs = [POOL_A, POOL_B];
+    const labels = ["A", "B"];
+    if (POOL_C) { addrs.push(POOL_C); labels.push("C"); }
 
-    const [dqa, dqb] = await batch([
-        ["eth_call", [{ to: QA, data: SEL.decimals }, "latest"]],
-        ["eth_call", [{ to: QB, data: SEL.decimals }, "latest"]],
-    ]);
-    decQA = Number(firstUint(dqa) ?? 18n); decQB = Number(firstUint(dqb) ?? 18n);
-
-    const qaStable = STABLES.has(QA), qbStable = STABLES.has(QB);
-    console.log(`Base token : ${BASE_TOK}`);
-    console.log(`Pool A ${POOL_A} fee ${feeA}  quote=${QA}${qaStable ? " (stable)" : ""}`);
-    console.log(`Pool B ${POOL_B} fee ${feeB}  quote=${QB}${qbStable ? " (stable)" : ""}`);
-    if (!qaStable || !qbStable) {
-        console.log("  WARNING: a quote token is NOT a known stablecoin. The USD/cross-quote leg assumes ~1:1 stables;");
-        console.log("  results for a non-stable quote are approximate. Pass stablecoin pools for an exact read.");
+    const pools = [];
+    for (let i = 0; i < addrs.length; i++) {
+        const p = await loadPool(addrs[i]);
+        p.quoter = QUOTER; p.label = labels[i];
+        pools.push(p);
     }
-}
+    RUNTIME.pools = pools;
 
-// Cycle (watch-only): start with `startUsd` worth of pool-B's quote token, buy BASE on
-// pool B, sell BASE on pool A for pool-A's quote, and (if quotes differ, both stables)
-// treat the result ~1:1 back to the start quote. Also tries the reverse (A first).
-// Returns the best net in USD. Uses QuoterV2 for exact executable amounts incl. fees.
-async function cycleOut(startUsd, tag) {
-    // amounts in each quote's own decimals (stables assumed ~$1)
-    const inB = BigInt(Math.round(startUsd * 10 ** decQB)); // start in QB
-    const inA = BigInt(Math.round(startUsd * 10 ** decQA)); // start in QA
-
-    // Direction 1: QB -> BASE (pool B) -> QA (pool A)
-    // Direction 2: QA -> BASE (pool A) -> QB (pool B)
-    const [b1q, a1q] = await batch([
-        quoteCall(QB, BASE_TOK, inB, feeB, tag),   // buy BASE on pool B with QB
-        quoteCall(QA, BASE_TOK, inA, feeA, tag),   // buy BASE on pool A with QA
-    ]);
-    const baseFromB = firstUint(b1q), baseFromA = firstUint(a1q);
-    const calls = [];
-    calls.push(baseFromB != null ? quoteCall(BASE_TOK, QA, baseFromB, feeA, tag) : ["eth_chainId", []]); // sell on A -> QA
-    calls.push(baseFromA != null ? quoteCall(BASE_TOK, QB, baseFromA, feeB, tag) : ["eth_chainId", []]); // sell on B -> QB
-    const [o1, o2] = await batch(calls);
-
-    // If the two pools quote in DIFFERENT stablecoins (e.g. B3/USDC vs B3/USDT),
-    // the cycle ends in the wrong stable and needs a 3rd swap (USDT<->USDC) to truly
-    // return to the start token. Charge a conservative cost for that leg so we don't
-    // over-count. Default 5 bps (~a stable-pool fee); override with --stable-leg-bps.
-    const crossStable = QA !== QB;
-    const stableLegBps = Number(opt("stable-leg-bps", "5"));
-    const haircut = (usd) => (crossStable ? (usd * stableLegBps) / 10000 : 0);
-
-    let best = null;
-    // dir1: started with startUsd of QB, ended with QA out -> net USD = QA_out_usd - startUsd - 3rd-leg
-    if (baseFromB != null) {
-        const outUsd = o1 && o1 !== "0x" ? Number(firstUint(o1)) / 10 ** decQA : null; // QA ~ $1
-        if (outUsd != null) best = { dir: "B->A", net: outUsd - startUsd - haircut(outUsd) };
+    const decimalsFn = (t) => tokenDecimals(t);
+    // Pairings: A<->B always; add A<->C and B<->C when poolC is present.
+    const combos = POOL_C ? [[0, 1], [0, 2], [1, 2]] : [[0, 1]];
+    RUNTIME.pairings = [];
+    for (const [i, j] of combos) {
+        const plan = await detectShape(pools[i], pools[j], { decimalsFn });
+        RUNTIME.pairings.push({ x: pools[i], y: pools[j], plan, label: `${pools[i].label}<->${pools[j].label}` });
     }
-    // dir2: started with startUsd of QA, ended with QB out
-    if (baseFromA != null) {
-        const outUsd = o2 && o2 !== "0x" ? Number(firstUint(o2)) / 10 ** decQB : null;
-        const net2 = outUsd != null ? outUsd - startUsd - haircut(outUsd) : null;
-        if (net2 != null && (!best || net2 > best.net)) best = { dir: "A->B", net: net2 };
+
+    // ---- report ----
+    for (const p of pools) {
+        console.log(`Pool ${p.label} ${p.addr} fee ${p.fee}  tokens=${p.t0},${p.t1}`);
     }
-    // price BASE in USD (from pool A quote) for gas conversion / display
-    if (baseFromA != null && baseFromA > 0n) baseUsd = startUsd / (Number(baseFromA) / 10 ** 18); // assumes BASE 18 dec
-    return best; // { dir, net(USD, pre-gas) }
+    for (const pr of RUNTIME.pairings) {
+        const { plan } = pr;
+        if (plan.mode === "SAME_PAIR") {
+            console.log(`${pr.label}: SAME-PAIR mode — base=${plan.base} (dec ${plan.decBase}), ` +
+                `quote=${plan.quote}${plan.quoteIsStable ? " (stable)" : ""}, no 3rd-leg haircut.`);
+        } else {
+            console.log(`${pr.label}: ONE-SHARED-TOKEN mode — base=${plan.base}, ` +
+                `QA=${plan.QA}, QB=${plan.QB}${plan.crossStable ? " (cross-stable: 3rd-leg haircut applied)" : ""}.`);
+        }
+        if (!plan.quoteIsStable) {
+            console.log("  WARNING: a quote token is NOT a known stablecoin. USD figures assume ~1:1 stables;");
+            console.log("  results for a non-stable quote are approximate. Pass stablecoin pools for an exact read.");
+        }
+    }
 }
 
 const STATS = { blocks: 0, signals: 0, bestNet: -Infinity, bestDesc: "", survived: 0 };
@@ -186,29 +308,32 @@ let lastSignal = null;
 async function onBlock(bn) {
     const tag = "0x" + bn.toString(16);
     const gasPrice = BigInt((await rpc("eth_gasPrice", [])) || "0x0");
-    // gas cost in USD: gas is paid in ETH; approximate ETH at $2500 if we can't price it
-    // (the cycle tokens here are a token + stables, so we don't have a direct ETH quote).
+    // gas cost in USD: gas is paid in ETH; approximate ETH price (default $2500).
     const ethUsd = Number(opt("eth-usd", "2500"));
     const gasUsd = (Number(gasPrice * GAS_UNITS) / 1e18) * ethUsd + L1_FEE_USD;
+    const stableLegBps = Number(opt("stable-leg-bps", "5"));
+    const quoteFn = makeLiveQuoteFn(tag);
 
-    // search sizes for the best net (cycleOut already returns net USD pre-gas)
+    // search sizes across ALL pairings for the best net (cycleOut returns net USD pre-gas)
     let best = null;
-    for (const usd of SIZES) {
-        const c = await cycleOut(usd, tag);
-        if (!c) continue;
-        const net = c.net - gasUsd;              // free flash loan (Morpho) -> no premium
-        if (!best || net > best.net) best = { usd, dir: c.dir, grossUsd: c.net, net };
+    for (const pr of RUNTIME.pairings) {
+        for (const usd of SIZES) {
+            const c = await cycleOut(usd, pr.plan, pr.x, pr.y, { quoteFn, stableLegBps });
+            if (!c) continue;
+            const net = c.net - gasUsd;          // free flash loan (Morpho) -> no premium
+            if (!best || net > best.net) best = { usd, dir: c.dir, pair: pr.label, grossUsd: c.net, net };
+        }
     }
     STATS.blocks++;
     const t = new Date().toISOString().slice(11, 19);
     if (!best) { console.log(`${t} block ${bn} | no quote`); return; }
-    if (best.net > STATS.bestNet) { STATS.bestNet = best.net; STATS.bestDesc = `block ${bn} ${best.dir} $${best.usd}`; }
+    if (best.net > STATS.bestNet) { STATS.bestNet = best.net; STATS.bestDesc = `block ${bn} ${best.pair} ${best.dir} $${best.usd}`; }
 
     const fire = best.net >= MIN_PROFIT_USD;
-    const line = `${t} block ${bn} | gas $${gasUsd.toFixed(3)} | best ${best.dir} $${best.usd}: ` +
+    const line = `${t} block ${bn} | gas $${gasUsd.toFixed(3)} | best ${best.pair} ${best.dir} $${best.usd}: ` +
         `gross $${best.grossUsd.toFixed(3)}, NET ${best.net >= 0 ? "+" : ""}$${best.net.toFixed(3)}` + (fire ? "  <<<< WOULD FIRE" : "");
     console.log(line);
-    fs.appendFileSync(LOG_FILE, [bn, best.dir, best.usd, best.grossUsd.toFixed(4), gasUsd.toFixed(4), best.net.toFixed(4), fire].join(",") + "\n");
+    fs.appendFileSync(LOG_FILE, [bn, best.pair, best.dir, best.usd, best.grossUsd.toFixed(4), gasUsd.toFixed(4), best.net.toFixed(4), fire].join(",") + "\n");
 
     if (fire) {
         STATS.signals++;
@@ -219,9 +344,10 @@ async function onBlock(bn) {
 
 function summary() {
     const hrs = (STATS.blocks * 2) / 3600; // Base ~2s blocks
+    const poolList = RUNTIME.pools.map((p) => `${p.label}=${p.addr.slice(0, 10)}`).join(" ");
     console.log("\n" + "=".repeat(80));
-    console.log(`WATCH-ONLY SUMMARY — base token ${BASE_TOK ? BASE_TOK.slice(0,10) : "?"}, pools ${POOL_A.slice(0,10)} & ${POOL_B.slice(0,10)}`);
-    console.log(`  blocks watched: ${STATS.blocks} (~${hrs.toFixed(2)} h) | fee tiers: A=${feeA} B=${feeB}`);
+    console.log(`WATCH-ONLY SUMMARY — pools ${poolList}`);
+    console.log(`  blocks watched: ${STATS.blocks} (~${hrs.toFixed(2)} h) | pairings: ${RUNTIME.pairings.map((p) => p.label).join(", ")}`);
     console.log(`  WOULD-FIRE signals (net >= $${MIN_PROFIT_USD}): ${STATS.signals}`);
     console.log(`  ...that persisted into the next block: ${STATS.survived}`);
     console.log(`  best net seen: $${STATS.bestNet.toFixed(3)} (${STATS.bestDesc})`);
@@ -233,8 +359,9 @@ function summary() {
 
 async function main() {
     await discover();
-    if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,dir,size_usd,gross_usd,gas_usd,net_usd,would_fire\n");
-    console.log(`\nWatching USDC/WETH on 2 pools, sizes $${SIZES.join(", $")}, signal threshold net >= $${MIN_PROFIT_USD}.`);
+    if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,pair,dir,size_usd,gross_usd,gas_usd,net_usd,would_fire\n");
+    const pairDesc = RUNTIME.pairings.map((p) => p.label).join(", ");
+    console.log(`\nWatching one pair across pools [${pairDesc}], sizes $${SIZES.join(", $")}, signal threshold net >= $${MIN_PROFIT_USD}.`);
     console.log(`Running ${MINUTES} min. Ctrl+C for summary.\n`);
     process.on("SIGINT", () => { summary(); process.exit(0); });
     const end = Date.now() + MINUTES * 60000;
@@ -248,4 +375,11 @@ async function main() {
     }
     summary();
 }
-main().catch((e) => { console.error(e.message); process.exit(1); });
+
+// Run main() only when executed directly; stay importable (pure functions) for tests.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+    main().catch((e) => { console.error(e.message); process.exit(1); });
+}
+
+// Exported for the in-process mock-RPC test suite (test/sim_two_dex_watcher.test.js).
+export { detectShape, cycleOut, loadPool, tokenDecimals, firstUint, addrW, quoteCall, STABLES };
