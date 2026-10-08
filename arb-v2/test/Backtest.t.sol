@@ -6,29 +6,27 @@ import {ArbExecutorV2} from "../src/ArbExecutorV2.sol";
 import {IERC20} from "../src/interfaces.sol";
 
 /*
- * Fork backtester. For each replay case (test/replay/cases.json), fork Base at the
- * block just before the arb landed, deploy ArbExecutorV2, and replay the exact
- * cycle. We assert the contract ends with MORE of the start token than it borrowed
- * — i.e. it would have reproduced a profitable arb with perfect hindsight. The run
- * prints a per-case result and a final capture summary.
+ * Fork backtester — CORRECT STATE version.
  *
- * BASE_RPC must be set. Each case decodes in a helper to keep the loop's local
- * variable count low (avoids "stack too deep").
+ * The earlier version forked at (block - 1), i.e. BEFORE the dislocation that
+ * made the arb profitable existed, so every replay looked unprofitable. This
+ * version forks the arb's block and rolls forward to JUST BEFORE the arb's own
+ * transaction (vm.rollFork(txHash)). That reproduces the exact state the winning
+ * bot acted on — the setup swaps earlier in the block are applied, the arb tx is
+ * not yet. We then run our contract against that state.
+ *
+ * Per case we print the probe (hops without flash loan) and run() result, then a
+ * capture summary. BASE_RPC must be set.
  */
 contract BacktestTest is Test {
     address constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
 
     string json;
 
-    function _u(string memory key) internal view returns (uint256) {
-        return vm.parseJsonUint(json, key);
-    }
-    function _a(string memory key) internal view returns (address) {
-        return vm.parseJsonAddress(json, key);
-    }
-    function _b(string memory key) internal view returns (bool) {
-        return vm.parseJsonBool(json, key);
-    }
+    function _u(string memory k) internal view returns (uint256) { return vm.parseJsonUint(json, k); }
+    function _a(string memory k) internal view returns (address) { return vm.parseJsonAddress(json, k); }
+    function _b(string memory k) internal view returns (bool) { return vm.parseJsonBool(json, k); }
+    function _s(string memory k) internal view returns (string memory) { return vm.parseJsonString(json, k); }
 
     function _route(uint256 i) internal view returns (ArbExecutorV2.Hop[] memory route) {
         string memory base = string.concat(".cases[", vm.toString(i), "]");
@@ -44,57 +42,41 @@ contract BacktestTest is Test {
         }
     }
 
-    // Diagnostic: run a single raw pool.swap to see if the pool call itself works
-    // (isolates "pool rejects our call" from "route unprofitable").
-    function _probeHop(uint256 i) internal {
+    function _runCase(uint256 i) internal returns (bool reproduced, uint256 profit) {
         string memory base = string.concat(".cases[", vm.toString(i), "]");
-        uint256 blk = _u(string.concat(base, ".block"));
         address startToken = _a(string.concat(base, ".startToken"));
         uint256 amountIn = _u(string.concat(base, ".amountIn"));
+        bytes32 txh = vm.parseBytes32(_s(string.concat(base, ".txHash")));
+
+        // Fork at the arb's block and roll to JUST BEFORE the arb tx: the setup
+        // dislocation is now present, the arb itself has not executed yet.
+        vm.createSelectFork(vm.rpcUrl("base"));
+        vm.rollFork(txh);
+
         ArbExecutorV2.Hop[] memory route = _route(i);
 
-        // fund the executor directly with the start token (skip Morpho) and run hops,
-        // reporting the amount after each hop so we see where it breaks / how much it nets.
-        ArbExecutorV2 exec = new ArbExecutorV2(MORPHO);
-        deal(startToken, address(exec), amountIn);
-        try exec.probe(startToken, amountIn, route) returns (uint256 endBal) {
-            console2.log("  probe case", i);
-            console2.log("    startToken amountIn:", amountIn);
-            console2.log("    endBal (same token):", endBal);
-        } catch (bytes memory reason) {
-            console2.log("  probe case REVERTED", i);
-            console2.logBytes(reason);
+        // Diagnostic probe (no flash loan): fund directly, run hops, see net.
+        ArbExecutorV2 probe = new ArbExecutorV2(MORPHO);
+        deal(startToken, address(probe), amountIn);
+        try probe.probe(startToken, amountIn, route) returns (uint256 endBal) {
+            console2.log("case", i, "probe endBal:", endBal);
+            console2.log("  (amountIn was:", amountIn, ")");
+        } catch {
+            console2.log("case", i, "probe REVERTED at correct state");
         }
-    }
 
-    function _runCase(uint256 i) internal returns (bool reproduced) {
-        string memory base = string.concat(".cases[", vm.toString(i), "]");
-        uint256 blk = _u(string.concat(base, ".block"));
-        address startToken = _a(string.concat(base, ".startToken"));
-        uint256 amountIn = _u(string.concat(base, ".amountIn"));
-
-        // Fork AT the arb's block (not blk-1): the dislocation is often created by an
-        // earlier tx in the SAME block, so blk-1 state has no opportunity. Forking at
-        // the block gives us end-of-prev-block state plus we re-run against live pool state.
-        vm.createSelectFork(vm.rpcUrl("base"), blk - 1);
-        ArbExecutorV2.Hop[] memory route = _route(i);
-
-        // First probe WITHOUT the flash loan to isolate swap mechanics from profit.
-        _probeHop(i);
-
+        // Real run with Morpho free flash loan + profit-or-revert.
         ArbExecutorV2 exec = new ArbExecutorV2(MORPHO);
-        try exec.run(startToken, amountIn, route, 0) returns (uint256 profit) {
-            if (profit > 0) {
-                console2.log("REPRODUCED case", i);
-                console2.log("  profit (start-token units):", profit);
-                return true;
+        try exec.run(startToken, amountIn, route, 0) returns (uint256 p) {
+            if (p > 0) {
+                console2.log("REPRODUCED case", i, "profit(start-token units):", p);
+                return (true, p);
             }
             console2.log("ZERO-profit case", i);
-            return false;
-        } catch (bytes memory reason) {
-            console2.log("MISSED case (reverted) ", i);
-            console2.logBytes(reason);
-            return false;
+            return (false, 0);
+        } catch {
+            console2.log("MISSED case (run reverted)", i);
+            return (false, 0);
         }
     }
 
@@ -103,7 +85,8 @@ contract BacktestTest is Test {
         uint256 n = _u(".count");
         uint256 reproduced;
         for (uint256 i = 0; i < n; i++) {
-            if (_runCase(i)) reproduced++;
+            (bool ok,) = _runCase(i);
+            if (ok) reproduced++;
         }
         console2.log("=== CAPTURE SUMMARY ===");
         console2.log("attempted:", n);
