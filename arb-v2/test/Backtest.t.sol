@@ -44,16 +44,45 @@ contract BacktestTest is Test {
         }
     }
 
+    // Diagnostic: run a single raw pool.swap to see if the pool call itself works
+    // (isolates "pool rejects our call" from "route unprofitable").
+    function _probeHop(uint256 i) internal {
+        string memory base = string.concat(".cases[", vm.toString(i), "]");
+        uint256 blk = _u(string.concat(base, ".block"));
+        address startToken = _a(string.concat(base, ".startToken"));
+        uint256 amountIn = _u(string.concat(base, ".amountIn"));
+        ArbExecutorV2.Hop[] memory route = _route(i);
+
+        // fund the executor directly with the start token (skip Morpho) and run hops,
+        // reporting the amount after each hop so we see where it breaks / how much it nets.
+        ArbExecutorV2 exec = new ArbExecutorV2(MORPHO);
+        deal(startToken, address(exec), amountIn);
+        try exec.probe(startToken, amountIn, route) returns (uint256 endBal) {
+            console2.log("  probe case", i);
+            console2.log("    startToken amountIn:", amountIn);
+            console2.log("    endBal (same token):", endBal);
+        } catch (bytes memory reason) {
+            console2.log("  probe case REVERTED", i);
+            console2.logBytes(reason);
+        }
+    }
+
     function _runCase(uint256 i) internal returns (bool reproduced) {
         string memory base = string.concat(".cases[", vm.toString(i), "]");
         uint256 blk = _u(string.concat(base, ".block"));
         address startToken = _a(string.concat(base, ".startToken"));
         uint256 amountIn = _u(string.concat(base, ".amountIn"));
 
+        // Fork AT the arb's block (not blk-1): the dislocation is often created by an
+        // earlier tx in the SAME block, so blk-1 state has no opportunity. Forking at
+        // the block gives us end-of-prev-block state plus we re-run against live pool state.
         vm.createSelectFork(vm.rpcUrl("base"), blk - 1);
-        ArbExecutorV2 exec = new ArbExecutorV2(MORPHO);
         ArbExecutorV2.Hop[] memory route = _route(i);
 
+        // First probe WITHOUT the flash loan to isolate swap mechanics from profit.
+        _probeHop(i);
+
+        ArbExecutorV2 exec = new ArbExecutorV2(MORPHO);
         try exec.run(startToken, amountIn, route, 0) returns (uint256 profit) {
             if (profit > 0) {
                 console2.log("REPRODUCED case", i);
@@ -62,8 +91,9 @@ contract BacktestTest is Test {
             }
             console2.log("ZERO-profit case", i);
             return false;
-        } catch {
+        } catch (bytes memory reason) {
             console2.log("MISSED case (reverted) ", i);
+            console2.logBytes(reason);
             return false;
         }
     }

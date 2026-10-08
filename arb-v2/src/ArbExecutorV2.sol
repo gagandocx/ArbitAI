@@ -107,6 +107,23 @@ contract ArbExecutorV2 {
         IERC20(startToken).approve(address(morpho), assets);
     }
 
+    event HopResult(uint256 index, uint256 amountIn, uint256 amountOut);
+
+    // Diagnostic: run the route with tokens ALREADY in the contract (no flash loan),
+    // emitting each hop's in/out so a backtest can see where it breaks and how much
+    // it nets. Returns the final start-token balance.
+    function probe(address startToken, uint256 amountIn, Hop[] calldata route)
+        external onlyExecutor returns (uint256)
+    {
+        uint256 amt = amountIn;
+        for (uint256 i = 0; i < route.length; i++) {
+            uint256 out = _swap(route[i], amt);
+            emit HopResult(i, amt, out);
+            amt = out;
+        }
+        return IERC20(startToken).balanceOf(address(this));
+    }
+
     // ---- execute one V3-style hop via direct pool.swap() ----
     function _swap(Hop memory hop, uint256 amountIn) internal returns (uint256 out) {
         // pay-in happens in the swap callback; we pass tokenIn+pool through transient-ish memory
