@@ -35,16 +35,23 @@ const LOG_FILE = opt("log", "two_dex_watch.csv");
 const RPCS = process.env.RPC_URL ? [process.env.RPC_URL]
     : ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://1rpc.io/base"];
 
-// ---- the proven hotspot pair/pools on Base (USDC/WETH), from the recon ----
+// ---- the proven hotspot pools on Base (the token 0x07b3… = B3, vs USDC & USDT) ----
+// The watcher AUTO-DETECTS each pool's tokens, so it works for any two pools that
+// share a common "base" token traded against two (possibly different) quote tokens.
 const lower = (a) => a.toLowerCase();
-const USDC = lower("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
-const WETH = lower("0x4200000000000000000000000000000000000006");
 const QUOTER = lower(opt("quoter", "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")); // Uniswap QuoterV2 on Base
-const POOL_A = lower(opt("poolA", "0xf411dbf5978ce4089cf40ef7b83f813efd312fb0")); // #1 arbitraged pool
-const POOL_B = lower(opt("poolB", "0x2df380544b88adb3ad0a94100dcc45fd705aae2d")); // #2 arbitraged pool
+const POOL_A = lower(opt("poolA", "0xf411dbf5978ce4089cf40ef7b83f813efd312fb0")); // #1 arbitraged pool (B3/USDT)
+const POOL_B = lower(opt("poolB", "0x2df380544b88adb3ad0a94100dcc45fd705aae2d")); // #2 arbitraged pool (B3/USDC)
+// stablecoins we treat as ~$1 and freely convertible (for the quote-token leg)
+const STABLES = new Set([
+    lower("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC
+    lower("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"), // USDT
+    lower("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"), // USDbC
+    lower("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"), // DAI
+]);
 
 const SEL = { slot0: "0x3850c7bd", token0: "0x0dfe1681", token1: "0xd21220a7", fee: "0xddca3f43",
-    quote: "0xc6a5026a" };
+    decimals: "0x313ce567", quote: "0xc6a5026a" };
 
 // ----------------------------------------------------- read-only RPC ----
 const ALLOWED = new Set(["eth_blockNumber", "eth_call", "eth_gasPrice", "eth_chainId"]);
@@ -83,7 +90,11 @@ function quoteCall(tokenIn, tokenOut, amountIn, fee, blockTag) {
 }
 
 // ----------------------------------------------------- setup ----
-let feeA = 0, feeB = 0, wethUsd = 0;
+// Auto-detected: the shared "base" token (e.g. B3) and each pool's quote token.
+let BASE_TOK = null, QA = null, QB = null;        // base token, pool-A quote, pool-B quote
+let feeA = 0, feeB = 0, decQA = 6, decQB = 6, baseUsd = 0;
+const addrW = (hex) => "0x" + strip(hex).slice(24).toLowerCase();
+
 async function discover() {
     const chainId = await rpc("eth_chainId", []);
     if (chainId !== "0x2105") throw new Error(`Expected Base (0x2105), got ${chainId}. Point RPC_URL at Base.`);
@@ -95,39 +106,69 @@ async function discover() {
         ["eth_call", [{ to: POOL_B, data: SEL.token1 }, "latest"]],
         ["eth_call", [{ to: POOL_B, data: SEL.fee }, "latest"]],
     ]);
-    const a0 = "0x" + strip(t0a).slice(24), a1 = "0x" + strip(t1a).slice(24);
-    const b0 = "0x" + strip(t0b).slice(24), b1 = "0x" + strip(t1b).slice(24);
+    const a0 = addrW(t0a), a1 = addrW(t1a), b0 = addrW(t0b), b1 = addrW(t1b);
     feeA = Number(firstUint(fa) ?? 0n); feeB = Number(firstUint(fb) ?? 0n);
-    const okA = [a0, a1].sort().join() === [USDC, WETH].sort().join();
-    const okB = [b0, b1].sort().join() === [USDC, WETH].sort().join();
-    console.log("Pool A", POOL_A, "fee", feeA, okA ? "(USDC/WETH ok)" : "!! NOT USDC/WETH: " + a0 + "," + a1);
-    console.log("Pool B", POOL_B, "fee", feeB, okB ? "(USDC/WETH ok)" : "!! NOT USDC/WETH: " + b0 + "," + b1);
-    if (!okA || !okB) throw new Error("A pool is not the USDC/WETH pair — pass --poolA/--poolB with correct addresses.");
-    if (!feeA || !feeB) throw new Error("Could not read pool fees (is QuoterV2 address right? pass --quoter).");
+    if (!feeA || !feeB) throw new Error("Could not read pool fees (is the --quoter / pool address right?).");
+
+    // the base token is the one both pools share
+    const setB = new Set([b0, b1]);
+    const shared = [a0, a1].filter((t) => setB.has(t));
+    if (shared.length !== 1) throw new Error(`Pools do not share exactly one token (A=${a0},${a1} B=${b0},${b1}). Pass two pools of the SAME base token vs two quotes.`);
+    BASE_TOK = shared[0];
+    QA = a0 === BASE_TOK ? a1 : a0;   // pool-A quote token
+    QB = b0 === BASE_TOK ? b1 : b0;   // pool-B quote token
+
+    const [dqa, dqb] = await batch([
+        ["eth_call", [{ to: QA, data: SEL.decimals }, "latest"]],
+        ["eth_call", [{ to: QB, data: SEL.decimals }, "latest"]],
+    ]);
+    decQA = Number(firstUint(dqa) ?? 18n); decQB = Number(firstUint(dqb) ?? 18n);
+
+    const qaStable = STABLES.has(QA), qbStable = STABLES.has(QB);
+    console.log(`Base token : ${BASE_TOK}`);
+    console.log(`Pool A ${POOL_A} fee ${feeA}  quote=${QA}${qaStable ? " (stable)" : ""}`);
+    console.log(`Pool B ${POOL_B} fee ${feeB}  quote=${QB}${qbStable ? " (stable)" : ""}`);
+    if (!qaStable || !qbStable) {
+        console.log("  WARNING: a quote token is NOT a known stablecoin. The USD/cross-quote leg assumes ~1:1 stables;");
+        console.log("  results for a non-stable quote are approximate. Pass stablecoin pools for an exact read.");
+    }
 }
 
-// Quote both directions of a flash cycle for a given USDC input, pick the best.
-// Direction 1: USDC --A--> WETH --B--> USDC ; Direction 2: USDC --B--> WETH --A--> USDC
-async function cycleOut(usdcIn, tag) {
-    const amt = BigInt(Math.round(usdcIn * 1e6));
-    // leg1 both pools: USDC->WETH
-    const [wA, wB] = await batch([
-        quoteCall(USDC, WETH, amt, feeA, tag),
-        quoteCall(USDC, WETH, amt, feeB, tag),
+// Cycle (watch-only): start with `startUsd` worth of pool-B's quote token, buy BASE on
+// pool B, sell BASE on pool A for pool-A's quote, and (if quotes differ, both stables)
+// treat the result ~1:1 back to the start quote. Also tries the reverse (A first).
+// Returns the best net in USD. Uses QuoterV2 for exact executable amounts incl. fees.
+async function cycleOut(startUsd, tag) {
+    // amounts in each quote's own decimals (stables assumed ~$1)
+    const inB = BigInt(Math.round(startUsd * 10 ** decQB)); // start in QB
+    const inA = BigInt(Math.round(startUsd * 10 ** decQA)); // start in QA
+
+    // Direction 1: QB -> BASE (pool B) -> QA (pool A)
+    // Direction 2: QA -> BASE (pool A) -> QB (pool B)
+    const [b1q, a1q] = await batch([
+        quoteCall(QB, BASE_TOK, inB, feeB, tag),   // buy BASE on pool B with QB
+        quoteCall(QA, BASE_TOK, inA, feeA, tag),   // buy BASE on pool A with QA
     ]);
-    const wethA = firstUint(wA), wethB = firstUint(wB);
-    if (wethA == null && wethB == null) return null;
-    // leg2: sell the WETH on the OTHER pool back to USDC
+    const baseFromB = firstUint(b1q), baseFromA = firstUint(a1q);
     const calls = [];
-    if (wethA != null) calls.push(quoteCall(WETH, USDC, wethA, feeB, tag)); else calls.push(["eth_chainId", []]);
-    if (wethB != null) calls.push(quoteCall(WETH, USDC, wethB, feeA, tag)); else calls.push(["eth_chainId", []]);
+    calls.push(baseFromB != null ? quoteCall(BASE_TOK, QA, baseFromB, feeA, tag) : ["eth_chainId", []]); // sell on A -> QA
+    calls.push(baseFromA != null ? quoteCall(BASE_TOK, QB, baseFromA, feeB, tag) : ["eth_chainId", []]); // sell on B -> QB
     const [o1, o2] = await batch(calls);
-    const out1 = wethA != null ? firstUint(o1) : null; // A then B
-    const out2 = wethB != null ? firstUint(o2) : null; // B then A
+
     let best = null;
-    if (out1 != null) best = { dir: "A->B", out: out1 };
-    if (out2 != null && (!best || out2 > best.out)) best = { dir: "B->A", out: out2 };
-    return best ? { ...best, amt } : null;
+    // dir1: started with startUsd of QB, ended with QA out -> net USD = QA_out_usd - startUsd
+    if (baseFromB != null) {
+        const outUsd = o1 && o1 !== "0x" ? Number(firstUint(o1)) / 10 ** decQA : null; // QA ~ $1
+        if (outUsd != null) best = { dir: "B->A", net: outUsd - startUsd };
+    }
+    // dir2: started with startUsd of QA, ended with QB out
+    if (baseFromA != null) {
+        const outUsd = o2 && o2 !== "0x" ? Number(firstUint(o2)) / 10 ** decQB : null;
+        if (outUsd != null && (!best || (outUsd - startUsd) > best.net)) best = { dir: "A->B", net: outUsd - startUsd };
+    }
+    // price BASE in USD (from pool A quote) for gas conversion / display
+    if (baseFromA != null && baseFromA > 0n) baseUsd = startUsd / (Number(baseFromA) / 10 ** 18); // assumes BASE 18 dec
+    return best; // { dir, net(USD, pre-gas) }
 }
 
 const STATS = { blocks: 0, signals: 0, bestNet: -Infinity, bestDesc: "", survived: 0 };
@@ -136,19 +177,18 @@ let lastSignal = null;
 async function onBlock(bn) {
     const tag = "0x" + bn.toString(16);
     const gasPrice = BigInt((await rpc("eth_gasPrice", [])) || "0x0");
-    // price WETH in USDC from pool A (1 WETH quote) for the gas conversion
-    const [wq] = await batch([quoteCall(WETH, USDC, 10n ** 18n, feeA, tag)]);
-    const wUsd = firstUint(wq); if (wUsd != null) wethUsd = Number(wUsd) / 1e6;
-    const gasUsd = (Number(gasPrice * GAS_UNITS) / 1e18) * (wethUsd || 2500) + L1_FEE_USD;
+    // gas cost in USD: gas is paid in ETH; approximate ETH at $2500 if we can't price it
+    // (the cycle tokens here are a token + stables, so we don't have a direct ETH quote).
+    const ethUsd = Number(opt("eth-usd", "2500"));
+    const gasUsd = (Number(gasPrice * GAS_UNITS) / 1e18) * ethUsd + L1_FEE_USD;
 
-    // search sizes for the best net
+    // search sizes for the best net (cycleOut already returns net USD pre-gas)
     let best = null;
     for (const usd of SIZES) {
         const c = await cycleOut(usd, tag);
         if (!c) continue;
-        const grossUsd = (Number(c.out - c.amt) / 1e6);
-        const net = grossUsd - gasUsd;           // free flash loan (Morpho) -> no premium
-        if (!best || net > best.net) best = { usd, dir: c.dir, grossUsd, net };
+        const net = c.net - gasUsd;              // free flash loan (Morpho) -> no premium
+        if (!best || net > best.net) best = { usd, dir: c.dir, grossUsd: c.net, net };
     }
     STATS.blocks++;
     const t = new Date().toISOString().slice(11, 19);
@@ -156,14 +196,13 @@ async function onBlock(bn) {
     if (best.net > STATS.bestNet) { STATS.bestNet = best.net; STATS.bestDesc = `block ${bn} ${best.dir} $${best.usd}`; }
 
     const fire = best.net >= MIN_PROFIT_USD;
-    const line = `${t} block ${bn} | ETH $${(wethUsd || 0).toFixed(0)} | gas $${gasUsd.toFixed(3)} | best ${best.dir} $${best.usd}: ` +
+    const line = `${t} block ${bn} | gas $${gasUsd.toFixed(3)} | best ${best.dir} $${best.usd}: ` +
         `gross $${best.grossUsd.toFixed(3)}, NET ${best.net >= 0 ? "+" : ""}$${best.net.toFixed(3)}` + (fire ? "  <<<< WOULD FIRE" : "");
     console.log(line);
     fs.appendFileSync(LOG_FILE, [bn, best.dir, best.usd, best.grossUsd.toFixed(4), gasUsd.toFixed(4), best.net.toFixed(4), fire].join(",") + "\n");
 
     if (fire) {
         STATS.signals++;
-        // did the previous block's signal still stand this block? (persistence check)
         if (lastSignal === bn - 1) STATS.survived++;
         lastSignal = bn;
     }
@@ -172,7 +211,7 @@ async function onBlock(bn) {
 function summary() {
     const hrs = (STATS.blocks * 2) / 3600; // Base ~2s blocks
     console.log("\n" + "=".repeat(80));
-    console.log(`WATCH-ONLY SUMMARY — USDC/WETH, pools ${POOL_A.slice(0,10)} & ${POOL_B.slice(0,10)}`);
+    console.log(`WATCH-ONLY SUMMARY — base token ${BASE_TOK ? BASE_TOK.slice(0,10) : "?"}, pools ${POOL_A.slice(0,10)} & ${POOL_B.slice(0,10)}`);
     console.log(`  blocks watched: ${STATS.blocks} (~${hrs.toFixed(2)} h) | fee tiers: A=${feeA} B=${feeB}`);
     console.log(`  WOULD-FIRE signals (net >= $${MIN_PROFIT_USD}): ${STATS.signals}`);
     console.log(`  ...that persisted into the next block: ${STATS.survived}`);

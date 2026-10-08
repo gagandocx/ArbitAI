@@ -5,8 +5,9 @@ Requirements: **Node.js 18+**. No `npm install` needed.
 
 ## 0. Live two-DEX watcher (watch-only, the proven hotspot pair)
 
-`live_two_dex_watcher.mjs` watches the single most-arbitraged pair the recon found on Base — USDC/WETH on
-the two hotspot pools (`0xf411…`, `0x2df3…`) — every new block. From real on-chain QuoterV2 quotes it computes
+`live_two_dex_watcher.mjs` watches the single most-arbitraged token the recon found on Base — **B3**
+(`0x07b3…1291d0`), traded against USDC and USDT on the two hotspot pools (`0xf411…` = B3/USDT, `0x2df3…` = B3/USDC) —
+every new block. It auto-detects each pool's tokens, so `--poolA/--poolB` can point it at any token/two-pool setup. From real on-chain QuoterV2 quotes it computes
 a flash-loan cycle (borrow USDC → buy WETH on the cheaper pool → sell on the dearer → USDC) at several sizes,
 subtracts the live gas, and logs a **WOULD-FIRE** signal whenever a cycle would net more than a threshold.
 
