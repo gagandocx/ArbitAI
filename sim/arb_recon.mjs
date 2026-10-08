@@ -101,7 +101,7 @@ const rpc = async (m, p) => (await rpcBatch([[m, p]]))[0];
 
 // --------------------------------------------------------- helpers ----
 const strip = (h) => (h || "").replace(/^0x/, "");
-const toBig = (h) => BigInt(h);
+const toBig = (h) => (!h || h === "0x" ? 0n : BigInt(h));
 const hexInt = (h) => Number(BigInt(h));
 const addrOfTopic = (t) => "0x" + strip(t).slice(24).toLowerCase();
 // signed int256 from a 32-byte word
