@@ -21,6 +21,7 @@ const csvPath = args.find((a) => !a.startsWith("--"));
 const opt = (n, d) => { const i = args.indexOf("--" + n); return i >= 0 ? args[i + 1] : d; };
 const MIN_USD = Number(opt("min-usd", 5));
 const MAX = Number(opt("max", 40));
+const MAX_HOPS = Number(opt("max-hops", 3));   // reconstruct 2..N pool cycles (default up to 3)
 if (!csvPath) { console.error("usage: node MakeCases.mjs <recon.csv> [--min-usd 5] [--max 40]"); process.exit(1); }
 const RPCS = process.env.RPC_URL ? [process.env.RPC_URL]
     : ["https://mainnet.base.org", "https://base-rpc.publicnode.com"];
@@ -57,17 +58,17 @@ async function poolTokens(pool) {
 async function buildCase(row) {
     const [block, , , pools, cycle, token, profitUsd, flagged, , , txh] = row;
     if (flagged === "FLAGGED") return null;
-    if (Number(pools) !== 2) return null;              // start with the clean 2-pool case
+    const nPools = Number(pools);
+    if (nPools < 2 || nPools > MAX_HOPS) return null;   // 2..MAX_HOPS pool cycles
     if (!profitUsd || Number(profitUsd) < MIN_USD) return null;
 
     const rcpt = await rpc("eth_getTransactionReceipt", [txh]);
     if (!rcpt || !rcpt.logs) return null;
-    const swaps = rcpt.logs.filter((l) => l.topics[0] === T_V3);  // 2-pool V3 only, first cut
-    if (swaps.length !== 2) return null;
+    const swaps = rcpt.logs.filter((l) => l.topics[0] === T_V3);  // V3-style pools only
+    if (swaps.length !== nPools) return null;           // all hops must be V3 (skip mixed V2 for now)
 
     // Decode each swap into {pool, inToken, outToken, inAmt, zeroForOne}.
-    // Positive amount = token flowing INTO the pool (what the trader pays);
-    // negative = token flowing OUT (what the trader receives).
+    // Positive amount = token flowing INTO the pool (what the trader pays).
     const legs = [];
     for (const s of swaps) {
         const pool = s.address.toLowerCase();
@@ -79,19 +80,11 @@ async function buildCase(row) {
         const zeroForOne = amount0 > 0n;                 // token0 in, token1 out
         const inToken = zeroForOne ? token0 : token1;
         const outToken = zeroForOne ? token1 : token0;
-        const inAmt = zeroForOne ? amount0 : -amount1 < 0n ? amount0 : amount0; // input is the positive one
         const inPos = amount0 > 0n ? amount0 : amount1;  // the positive (paid) amount
         legs.push({ pool, zeroForOne, inToken, outToken, inAmt: inPos });
     }
 
-    // Verify it's a clean 2-pool cycle: the two legs must share both tokens
-    // (A->B on one pool, B->A on the other).
-    const sameCycle = (legs[0].outToken === legs[1].inToken && legs[1].outToken === legs[0].inToken);
-    if (!sameCycle) return null;
-
-    // The START token is the one the arbitrageur flash-borrows and profits in.
-    // The recon CSV gives it: `token` (col 5) is the known symbol or raw address of
-    // the net-positive token. Map known symbols back to addresses; else it's a 0x addr.
+    // Start token = the token the arbitrageur borrows and profits in (recon col 5).
     const SYM2ADDR = {
         USDC: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
         WETH: "0x4200000000000000000000000000000000000006",
@@ -101,15 +94,29 @@ async function buildCase(row) {
         cbBTC: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
     };
     let startToken = SYM2ADDR[token] || (token && token.startsWith("0x") ? token.toLowerCase() : null);
-    // Fallback: if the CSV token isn't one of our pools' tokens, pick whichever of
-    // the two cycle tokens matches; otherwise default to leg0's inToken.
-    const cycleTokens = [legs[0].inToken, legs[0].outToken];
-    if (!startToken || !cycleTokens.includes(startToken)) startToken = legs[0].inToken;
+    const allInTokens = legs.map((l) => l.inToken);
+    if (!startToken || !allInTokens.includes(startToken)) startToken = null;
 
-    // Order the hops so hop0 PAYS the start token.
-    const first = legs[0].inToken === startToken ? legs[0] : legs[1];
-    const second = first === legs[0] ? legs[1] : legs[0];
-    const ordered = [first, second];
+    // Greedily chain legs into a cycle starting from `startToken`: each hop's
+    // outToken must equal the next hop's inToken, and the last hop returns to start.
+    // If startToken is unknown, try each leg's inToken as the start.
+    const starts = startToken ? [startToken] : allInTokens;
+    let ordered = null;
+    for (const st of starts) {
+        const remaining = legs.slice();
+        const chain = [];
+        let cur = st;
+        let okChain = true;
+        for (let step = 0; step < legs.length; step++) {
+            const idx = remaining.findIndex((l) => l.inToken === cur);
+            if (idx < 0) { okChain = false; break; }
+            const leg = remaining.splice(idx, 1)[0];
+            chain.push(leg);
+            cur = leg.outToken;
+        }
+        if (okChain && remaining.length === 0 && cur === st) { ordered = chain; startToken = st; break; }
+    }
+    if (!ordered) return null;                           // not a clean single cycle
 
     const amountIn = ordered[0].inAmt.toString();
     const hops = ordered.map((l) => ({ pool: l.pool, zeroForOne: l.zeroForOne, tokenIn: l.inToken }));
@@ -130,6 +137,6 @@ async function main() {
     }
     // `count` is emitted flat so the Solidity test can read it without array-length cheats
     process.stdout.write(JSON.stringify({ chain: "base", count: cases.length, cases }, null, 2) + "\n");
-    console.error(`Built ${cases.length} replay cases (2-pool V3, >= $${MIN_USD}).`);
+    console.error(`Built ${cases.length} replay cases (2..${MAX_HOPS}-pool V3, >= $${MIN_USD}).`);
 }
 main().catch((e) => { console.error(e.message); process.exit(1); });
