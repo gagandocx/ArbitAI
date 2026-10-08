@@ -7,6 +7,8 @@ optimizer = true
 optimizer_runs = 1000000
 # the fork test reads many JSON fields into locals; via_ir avoids "stack too deep"
 via_ir = true
+# allow the test to read the replay cases file (forge sandboxes fs reads by default)
+fs_permissions = [{ access = "read", path = "./test/replay" }]
 # fork tests read historical Base state; set BASE_RPC in your env
 [rpc_endpoints]
 base = "${BASE_RPC}"
