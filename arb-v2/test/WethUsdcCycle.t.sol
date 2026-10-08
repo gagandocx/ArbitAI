@@ -43,6 +43,21 @@ import {IERC20, IV3Pool} from "../src/interfaces.sol";
  * swapping env each run: (POOL_A=Uni,POOL_B=Pancake), (POOL_A=Uni,POOL_B=Sushi),
  * (POOL_A=Pancake,POOL_B=Sushi).
  *
+ * GENERIC BASE/QUOTE ENV PARAMETERS: WETH and USDC here are GENERIC base/quote
+ * parameters, not hardcoded tokens. Both are read from env (WETH via vm.envOr with a
+ * Base default, USDC via vm.envOr with a Base default), and POOL_A/POOL_B/POOL_C come
+ * from env (vm.envAddress/vm.envOr). So ANY discovered base/quote pair OF THE SAME
+ * CYCLE SHAPE can be fork-confirmed by setting env alone -- the smarter search
+ * (harness/search_once.mjs) assembles exactly this env for a market that crosses the
+ * net threshold: WETH:=pair.base, USDC:=pair.quote, POOL_A/B/C:=the discovered pools.
+ * SHAPE CAVEAT: the console labels say "WETH/USDC" and the gross math compares
+ * end-quote to start-quote directly, assuming an 18-dec base traded against a 6-dec
+ * ~$1 stable quote. A NON-STANDARD pair (e.g. a WBTC 8-dec base, or a non-stable
+ * quote) does NOT fit this shape: its labels/scaling would be misleading, so it needs
+ * a TAILORED test. The harness detects this and degrades such a pair to
+ * UNCONFIRMED/SKIPPED rather than claiming REAL. This test's executable logic is
+ * unchanged by that note; only standard-shape pairs should be fork-confirmed here.
+ *
  * ON ARBITRUM: WETH and USDC are read from env too, so point them at the canonical
  * Arbitrum tokens and fork an Arbitrum RPC. The deep WETH/USDC pools (Uniswap V3,
  * PancakeSwap V3, SushiSwap V3) live on Arbitrum, so this is the intended run:

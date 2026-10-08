@@ -19,3 +19,8 @@ two_dex_watch.csv
 harness/results/
 harness/history.csv
 harness/loop.out
+
+# smarter autonomous search runtime artifacts (persistent scoreboard, append-only gaps log, loop output)
+harness/scoreboard.json
+harness/gaps_history.csv
+harness/search_loop.out

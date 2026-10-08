@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "WATCHLIST — the search space for the smarter autonomous search (harness/search_once.mjs).",
+    "DEPENDENCY-FREE config. NO key material and NO RPC URL live in this file: each chain",
+    "names an ENV VAR (rpc_env) and the RPC URL is read from the environment at run time.",
+    "Each (chain, pair, set-of-per-DEX-pools) is compared CROSS-DEX exactly like the watcher's",
+    "SAME-PAIR mode: for a pair (base, quote) the search discovers each DEX's V3 pool, then",
+    "evaluates the A<->B / A<->C / B<->C cross-DEX cycles on recent blocks and records the gap.",
+    "Pair tokens resolve from sim/dex_registry.mjs TOKENS (per chain). A pair whose base or",
+    "quote token is NOT present for a chain (e.g. ARB on base, cbETH on arbitrum) is SKIPPED",
+    "gracefully by expandWatchlist — it is never an error. A WIDE search over many markets runs",
+    "SLOWLY ON A FREE RPC TIER BY DESIGN: small batch_size, few blocks_per_market, and the",
+    "throttle+429 backoff keep it under the free-tier rate limit instead of crashing.",
+    "MEASUREMENT ONLY: the search never trades and never holds keys."
+  ],
+  "chains": {
+    "arbitrum": { "enabled": true, "rpc_env": "ARBITRUM_RPC_URL" },
+    "base": { "enabled": true, "rpc_env": "BASE_RPC_URL" }
+  },
+  "pairs": [
+    { "base": "WETH", "quote": "USDC" },
+    { "base": "WETH", "quote": "USDT" },
+    { "base": "WBTC", "quote": "WETH" },
+    { "base": "WETH", "quote": "DAI" },
+    { "base": "ARB", "quote": "WETH", "chains": ["arbitrum"] },
+    { "base": "cbETH", "quote": "WETH", "chains": ["base"] }
+  ],
+  "dexes": ["uniswap", "pancake", "sushi"],
+  "batch_size": 4,
+  "blocks_per_market": 2,
+  "base_delay_ms": 250,
+  "max_delay_ms": 5000,
+  "net_threshold_usd": 0.5,
+  "sizes": [1000, 5000, 20000, 100000]
+}

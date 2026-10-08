@@ -306,6 +306,100 @@ function fmt(n, dp = 4) {
   return Number(n).toFixed(dp);
 }
 
+// ---------------------------------------------------------------------------
+// FORK-CONFIRM ENV ASSEMBLY + SHAPE FITNESS (pure, for the smarter search)
+// ---------------------------------------------------------------------------
+// The WethUsdcCycle fork test (arb-v2/test/WethUsdcCycle.t.sol) reads WETH/USDC and
+// POOL_A/POOL_B/POOL_C from env (vm.envOr/vm.envAddress). A discovered market can be
+// fork-confirmed by env alone when its SHAPE matches the test's assumptions:
+//   - base behaves like WETH (18-dec-ish, NOT ~$1), and
+//   - quote behaves like USDC (6-dec-ish stablecoin).
+// The test's console labels say "WETH/USDC" and treat USDC as 6-dec; a mismatched pair
+// (e.g. WBTC 8-dec base, or a non-stable quote) would be MIS-LABELLED and the gross
+// math (compare end-quote to start-quote directly) would not mean what it says. So for
+// a mismatched shape we DO NOT claim REAL: we still assemble env + a clear note, and
+// the harness degrades the status to UNCONFIRMED/SKIPPED (needs a tailored test).
+
+// forkShapeFitness(obs) -> { fits, status, note }. PURE.
+//   fits=true  -> status "CONFIRMABLE": safe to run the existing WethUsdcCycle test and
+//                 apply the REAL/MIRAGE verdict.
+//   fits=false -> status "UNCONFIRMED": the pair does not match the test's shape; a
+//                 tailored test is needed. The harness MUST NOT assert REAL.
+// Inputs it uses from an observation: quoteIsStable (quote is a known stablecoin) and
+// decBase (base token decimals; the test prints WETH as 18-dec). A 6-dec quote is the
+// test's assumption; we treat quoteIsStable as the stand-in for "quote ~ 6-dec $1".
+export function forkShapeFitness(obs) {
+  const decBase = Number(obs && obs.decBase);
+  const quoteStable = !!(obs && obs.quoteIsStable);
+  const reasons = [];
+  // base must be an 18-dec-ish token (the test labels and scales it as WETH 18-dec).
+  if (!Number.isFinite(decBase) || decBase !== 18) {
+    reasons.push(`base decimals ${Number.isFinite(decBase) ? decBase : "unknown"} != 18 (test assumes an 18-dec WETH-ish base)`);
+  }
+  // quote must be a known stablecoin (the test treats the quote as 6-dec ~$1 USDC).
+  if (!quoteStable) {
+    reasons.push("quote is not a known stablecoin (test compares end-quote to start-quote as ~$1 USDC)");
+  }
+  if (reasons.length === 0) {
+    return { fits: true, status: "CONFIRMABLE", note: "shape matches WethUsdcCycle (18-dec base, stable quote): fork-confirmable by env alone" };
+  }
+  return {
+    fits: false,
+    status: "UNCONFIRMED",
+    note: "non-standard shape, needs a tailored test: " + reasons.join("; "),
+  };
+}
+
+// assembleForkEnv(obs) -> { env, pools, status, note, fits }. PURE.
+// Maps a crossing observation onto the EXISTING fork test's env:
+//   WETH   := base token address, USDC := quote token address,
+//   POOL_A := first discovered pool, POOL_B := second, POOL_C := third (if present).
+// The test already reads all of these via vm.envAddress/vm.envOr, so ANY base/quote
+// pair of the same cycle shape fork-confirms by env alone. For a mismatched shape the
+// env is still assembled (so the user CAN run a tailored check) but status is
+// UNCONFIRMED and the harness will not claim REAL.
+export function assembleForkEnv(obs) {
+  const fitness = forkShapeFitness(obs);
+  const pools = obs && obs.pools ? obs.pools : {};
+  const poolAddrs = Object.values(pools).filter(Boolean);
+  const env = {};
+  if (obs && obs.baseAddr) env.WETH = obs.baseAddr;
+  if (obs && obs.quoteAddr) env.USDC = obs.quoteAddr;
+  if (poolAddrs[0]) env.POOL_A = poolAddrs[0];
+  if (poolAddrs[1]) env.POOL_B = poolAddrs[1];
+  if (poolAddrs[2]) env.POOL_C = poolAddrs[2];
+  return {
+    env,
+    pools: poolAddrs,
+    fits: fitness.fits,
+    status: fitness.status,
+    note: fitness.note,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GAPS HISTORY CSV (append-only) — the per-observation research log.
+// ---------------------------------------------------------------------------
+// Columns: timestamp,chain,pair,dex_pair,block,gross_gap_usd,net_usd,would_confirm
+export const GAPS_HISTORY_HEADER = "timestamp,chain,pair,dex_pair,block,gross_gap_usd,net_usd,would_confirm";
+
+// buildGapsHistoryRow({ timestamp, obs, netUsd, wouldConfirm }) -> a comma-joined CSV
+// row string (no newline), matching GAPS_HISTORY_HEADER. PURE.
+export function buildGapsHistoryRow({ timestamp, obs, netUsd, wouldConfirm }) {
+  const gross = obs && obs.grossUsd != null ? obs.grossUsd : (obs && obs.gapUsd != null ? obs.gapUsd : 0);
+  const net = netUsd != null ? netUsd : gross;
+  return [
+    timestamp,
+    obs ? obs.chain : "",
+    obs ? obs.pair : "",
+    obs ? obs.dexPair : "",
+    obs ? obs.block : "",
+    fmt(gross),
+    fmt(net),
+    wouldConfirm ? "true" : "false",
+  ].join(",");
+}
+
 // CLI: small dispatcher so the shell scripts can call sub-commands without inlining
 // JS. Not required for the unit tests (they import the functions directly).
 //   node harness/make_report.mjs summarize <history.csv>
