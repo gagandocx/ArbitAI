@@ -180,6 +180,15 @@ async function scanBlock(bn) {
         const pools = [...new Set(swaps.map((s) => lower(s.address)))];
         if (pools.length < MIN_HOPS) continue;
 
+        // Track gross in/out per address per token so we can require a true CYCLE
+        // (the profit token must have been BOTH received and sent by the arb address —
+        // i.e. it round-tripped — not merely relayed/forwarded once).
+        const grossIn = new Map(), grossOut = new Map(); // addr -> token -> amt
+        for (const tr of transfers) {
+            const gi = grossIn.get(tr.to) || new Map(); gi.set(tr.token, (gi.get(tr.token) || 0n) + tr.amt); grossIn.set(tr.to, gi);
+            const go = grossOut.get(tr.from) || new Map(); go.set(tr.token, (go.get(tr.token) || 0n) + tr.amt); grossOut.set(tr.from, go);
+        }
+
         let arb = null;
         for (const [addr, m] of perAddrToken) {
             const positives = [...m.entries()].filter(([, v]) => v > 0n);
@@ -187,8 +196,13 @@ async function scanBlock(bn) {
             // classic atomic arb: net-positive in one token, roughly net-zero elsewhere
             if (positives.length === 1 && negatives.length === 0) {
                 const [token, profit] = positives[0];
-                arb = { addr, token, profit };
-                break;
+                // CYCLE REQUIREMENT: the profit token must have round-tripped through
+                // this address (both received AND sent during the tx). A token that was
+                // only received (relayed/forwarded) is NOT arbitrage profit — this is
+                // what caused the phantom ~$437k rows.
+                const sentSame = (grossOut.get(addr)?.get(token) || 0n) > 0n;
+                const recvSame = (grossIn.get(addr)?.get(token) || 0n) > 0n;
+                if (sentSame && recvSame) { arb = { addr, token, profit }; break; }
             }
         }
         if (!arb) continue;
@@ -210,7 +224,12 @@ async function scanBlock(bn) {
         if (idx === 0) STATS.firstInBlock++;
 
         const kt = KNOWN[arb.token];
-        const profUsd = kt && kt.usd != null ? Number(arb.profit) / 10 ** kt.d * kt.usd : null;
+        let profUsd = kt && kt.usd != null ? Number(arb.profit) / 10 ** kt.d * kt.usd : null;
+        // Sanity flag: a single on-chain arb netting > $100k is implausible on Base and
+        // almost always a decimals/relay artifact. Record it but mark as untrusted so it
+        // does not pollute totals/medians.
+        let flagged = false;
+        if (profUsd != null && profUsd > 100000) { flagged = true; }
         const gasEth = Number(gasUsed * effPrice) / 1e18;
 
         STATS.arbTxs++;
@@ -225,9 +244,9 @@ async function scanBlock(bn) {
         cy.count++; cy.hopsSum += pools.length; STATS.byCycle.set(cycle, cy);
 
         STATS.arbSamples.push({ bn, txh, idx, txCount, hops: pools.length, cycle, token: kt?.s || sym(arb.token),
-            profit: arb.profit.toString(), profUsd, gasEth, priorityGwei: Number(priority) / 1e9 });
+            profit: arb.profit.toString(), profUsd, flagged, gasEth, priorityGwei: Number(priority) / 1e9 });
         fs.appendFileSync(LOG_FILE, [bn, idx, txCount, pools.length, cycle, kt?.s || sym(arb.token),
-            profUsd != null ? profUsd.toFixed(4) : "", gasEth.toFixed(8), (Number(priority) / 1e9).toFixed(4), txh].join(",") + "\n");
+            profUsd != null ? profUsd.toFixed(4) : "", flagged ? "FLAGGED" : "", gasEth.toFixed(8), (Number(priority) / 1e9).toFixed(4), txh].join(",") + "\n");
     }
 }
 
@@ -256,17 +275,24 @@ function report() {
     [...STATS.byPool.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, TOP)
         .forEach(([p, v]) => console.log(`    ${String(v.count).padStart(5)}×  ${p}  ${v.class}`));
 
-    const withUsd = STATS.arbSamples.filter((s) => s.profUsd != null);
-    if (withUsd.length) {
-        withUsd.sort((a, b) => b.profUsd - a.profUsd);
-        const sum = withUsd.reduce((s, x) => s + x.profUsd, 0);
-        console.log(`\n  Profit (only arbs ending in a stablecoin, ${withUsd.length} of ${STATS.arbTxs}):`);
-        console.log(`    total ~$${sum.toFixed(2)} | avg ~$${(sum / withUsd.length).toFixed(2)} | median ~$${withUsd[Math.floor(withUsd.length / 2)].profUsd.toFixed(2)} | best ~$${withUsd[0].profUsd.toFixed(2)}`);
+    const trusted = STATS.arbSamples.filter((s) => s.profUsd != null && !s.flagged);
+    const flaggedArr = STATS.arbSamples.filter((s) => s.flagged);
+    if (trusted.length) {
+        trusted.sort((a, b) => b.profUsd - a.profUsd);
+        const sum = trusted.reduce((s, x) => s + x.profUsd, 0);
+        console.log(`\n  TRUSTED profit (stablecoin-ending, known decimals, < $100k, ${trusted.length} of ${STATS.arbTxs}):`);
+        console.log(`    total ~$${sum.toFixed(2)} | avg ~$${(sum / trusted.length).toFixed(2)} | median ~$${trusted[Math.floor(trusted.length / 2)].profUsd.toFixed(2)} | best ~$${trusted[0].profUsd.toFixed(2)}`);
+        const over = (t) => trusted.filter((s) => s.profUsd > t).length;
+        console.log(`    arbs over $1: ${over(1)} | over $5: ${over(5)} | over $20: ${over(20)} | over $100: ${over(100)}`);
         console.log(`    (profit is the on-chain token delta; gas is separate, avg ${fmtEth(STATS.arbSamples.reduce((s, x) => s + x.gasEth, 0) / STATS.arbSamples.length)})`);
-        console.log(`    Biggest 10 (stablecoin-ending):`);
-        withUsd.slice(0, 10).forEach((s) => console.log(`      $${s.profUsd.toFixed(2).padStart(8)}  ${s.cycle.padEnd(28)} ${s.hops} pools, gas ${s.gasEth.toFixed(6)} ETH, pos ${s.idx}/${s.txCount}, blk ${s.bn}`));
+        console.log(`    Biggest 10 trusted:`);
+        trusted.slice(0, 10).forEach((s) => console.log(`      $${s.profUsd.toFixed(2).padStart(10)}  ${s.cycle.padEnd(28)} ${s.hops} pools, gas ${s.gasEth.toFixed(6)} ETH, pos ${s.idx}/${s.txCount}, blk ${s.bn}`));
     } else {
-        console.log(`\n  (No stablecoin-ending arbs for USD profit; most Base arbs cycle in WETH. See ${LOG_FILE} for token deltas.)`);
+        console.log(`\n  (No trusted stablecoin-ending arbs; see ${LOG_FILE}.)`);
+    }
+    if (flaggedArr.length) {
+        console.log(`\n  FLAGGED (excluded from totals — > $100k, almost certainly decimals/relay artifacts): ${flaggedArr.length}`);
+        console.log(`    These need per-token decimal verification before trusting. Example value: $${flaggedArr[0].profUsd.toFixed(0)}`);
     }
     console.log(`\n  RPC errors: ${rpcErrors}. Full per-arb log: ${LOG_FILE}`);
     console.log("  NOTE: 'profit' is the arbitrageur's token gain measured on-chain; it already beat THEIR gas+bid.");
@@ -280,7 +306,7 @@ async function main() {
     const from = FROM ?? (latest - N_BLOCKS + 1);
     const to = FROM ? FROM + N_BLOCKS - 1 : latest;
     if (!process.env.RPC_URL) console.log("WARNING: no RPC_URL set — public endpoints will likely rate-limit full-block reads. Set your Alchemy URL first.\n");
-    if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,tx_index,tx_count,pools,cycle,profit_token,profit_usd,gas_eth,priority_gwei,tx_hash\n");
+    if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,tx_index,tx_count,pools,cycle,profit_token,profit_usd,flagged,gas_eth,priority_gwei,tx_hash\n");
     console.log(`Scanning Base blocks ${from}..${to} (${to - from + 1} blocks) for cyclic arbitrage...\n`);
 
     let done = 0;
