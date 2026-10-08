@@ -3,6 +3,23 @@
 All scripts are **read-only**: no wallet, no private key, no transactions, no money at risk.
 Requirements: **Node.js 18+**. No `npm install` needed.
 
+## 0. Arbitrage recon on Base (learn from the bots that win)
+
+`arb_recon.mjs` is read-only. It scans recent Base blocks, groups every DEX swap by transaction, and detects
+**cyclic arbitrage**: one transaction that swaps through two or more pools and ends holding more of the token it
+started with. For each winner it records the pools, token cycle, hop count, gas used, priority-fee bid, and the
+transaction's position in its block. Then it ranks the most-arbitraged pools and token cycles and summarises real
+profits. This tells us which setups to target, instead of guessing.
+
+```sh
+set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+node sim/arb_recon.mjs --blocks 300            # ~10 minutes of Base
+node sim/arb_recon.mjs --blocks 1000 --min-hops 2
+```
+
+Options: `--from <block>` (default: latest), `--min-hops 2`, `--top 40`, `--log arb_recon_log.csv`.
+A real RPC is strongly recommended — this reads full blocks and receipts, which public endpoints rate-limit.
+
 ## 1. Keeper replica on live Ethereum data (closest to the original)
 
 `keeper_replica.mjs` re-implements the original keeper's decision logic (Code.txt, Appendix A) function by function
