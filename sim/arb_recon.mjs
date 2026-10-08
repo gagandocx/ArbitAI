@@ -200,9 +200,15 @@ async function scanBlock(bn) {
                 // this address (both received AND sent during the tx). A token that was
                 // only received (relayed/forwarded) is NOT arbitrage profit — this is
                 // what caused the phantom ~$437k rows.
-                const sentSame = (grossOut.get(addr)?.get(token) || 0n) > 0n;
-                const recvSame = (grossIn.get(addr)?.get(token) || 0n) > 0n;
-                if (sentSame && recvSame) { arb = { addr, token, profit }; break; }
+                const outVol = grossOut.get(addr)?.get(token) || 0n;
+                const inVol = grossIn.get(addr)?.get(token) || 0n;
+                if (outVol > 0n && inVol > 0n) {
+                    // round-trip volume = the smaller of in/out; a real arb nets a small
+                    // SLICE of what it cycled, a relay "nets" ~all of what came in.
+                    const roundTrip = outVol < inVol ? outVol : inVol;
+                    arb = { addr, token, profit, roundTrip };
+                    break;
+                }
             }
         }
         if (!arb) continue;
@@ -228,8 +234,16 @@ async function scanBlock(bn) {
         // Sanity flag: a single on-chain arb netting > $100k is implausible on Base and
         // almost always a decimals/relay artifact. Record it but mark as untrusted so it
         // does not pollute totals/medians.
-        let flagged = false;
-        if (profUsd != null && profUsd > 100000) { flagged = true; }
+        let flagged = false, flagReason = "";
+        if (profUsd != null && profUsd > 100000) { flagged = true; flagReason = ">$100k"; }
+        // RELAY CHECK: profit as a fraction of the round-tripped volume of the profit
+        // token. A genuine arb nets a small slice (typically < a few %); a relayed/
+        // forwarded token shows profit ~= all of what round-tripped. Flag > 25%.
+        if (!flagged && arb.roundTrip > 0n) {
+            // profitShare = profit / roundTrip, in basis points (avoid float on bigint)
+            const shareBps = Number((arb.profit * 10000n) / arb.roundTrip);
+            if (shareBps > 2500) { flagged = true; flagReason = "profit>25% of volume (relay)"; }
+        }
         const gasEth = Number(gasUsed * effPrice) / 1e18;
 
         STATS.arbTxs++;
@@ -244,7 +258,7 @@ async function scanBlock(bn) {
         cy.count++; cy.hopsSum += pools.length; STATS.byCycle.set(cycle, cy);
 
         STATS.arbSamples.push({ bn, txh, idx, txCount, hops: pools.length, cycle, token: kt?.s || sym(arb.token),
-            profit: arb.profit.toString(), profUsd, flagged, gasEth, priorityGwei: Number(priority) / 1e9 });
+            profit: arb.profit.toString(), profUsd, flagged, flagReason, gasEth, priorityGwei: Number(priority) / 1e9 });
         fs.appendFileSync(LOG_FILE, [bn, idx, txCount, pools.length, cycle, kt?.s || sym(arb.token),
             profUsd != null ? profUsd.toFixed(4) : "", flagged ? "FLAGGED" : "", gasEth.toFixed(8), (Number(priority) / 1e9).toFixed(4), txh].join(",") + "\n");
     }
@@ -291,8 +305,12 @@ function report() {
         console.log(`\n  (No trusted stablecoin-ending arbs; see ${LOG_FILE}.)`);
     }
     if (flaggedArr.length) {
-        console.log(`\n  FLAGGED (excluded from totals — > $100k, almost certainly decimals/relay artifacts): ${flaggedArr.length}`);
-        console.log(`    These need per-token decimal verification before trusting. Example value: $${flaggedArr[0].profUsd.toFixed(0)}`);
+        console.log(`\n  FLAGGED (excluded from totals — artifacts: >$100k or profit>25% of cycled volume): ${flaggedArr.length}`);
+        const byReason = {};
+        for (const f of flaggedArr) byReason[f.flagReason] = (byReason[f.flagReason] || 0) + 1;
+        console.log(`    reasons: ${JSON.stringify(byReason)}`);
+        flaggedArr.sort((a, b) => (b.profUsd || 0) - (a.profUsd || 0));
+        console.log(`    biggest flagged: $${(flaggedArr[0].profUsd || 0).toFixed(0)} (${flaggedArr[0].flagReason}), cycle ${flaggedArr[0].cycle}`);
     }
     console.log(`\n  RPC errors: ${rpcErrors}. Full per-arb log: ${LOG_FILE}`);
     console.log("  NOTE: 'profit' is the arbitrageur's token gain measured on-chain; it already beat THEIR gas+bid.");
