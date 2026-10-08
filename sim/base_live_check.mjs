@@ -169,6 +169,14 @@ async function multicall(calls, tag = "latest") {
     const chunks = [];
     for (let i = 0; i < calls.length; i += MC_CHUNK) chunks.push(calls.slice(i, i + MC_CHUNK));
     const res = await rpcBatch(chunks.map((c) => ["eth_call", [{ to: MULTICALL3, data: encAggregate3(c) }, tag]]));
+    // retry failed batches (public RPCs often refuse some under load) before giving up
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        const failed = res.map((r, i) => (!r || r === "0x" ? i : -1)).filter((i) => i >= 0);
+        if (!failed.length) break;
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        const again = await rpcBatch(failed.map((i) => ["eth_call", [{ to: MULTICALL3, data: encAggregate3(chunks[i]) }, tag]]));
+        failed.forEach((i, k) => { if (again[k] && again[k] !== "0x") res[i] = again[k]; });
+    }
     const out = [];
     res.forEach((r, i) => {
         if (!r || r === "0x") { rpcErrors++; chunks[i].forEach(() => out.push({ success: false, ret: "0x" })); }
@@ -226,7 +234,9 @@ async function setup() {
     if (!mc || mc === "0x") throw new Error("Multicall3 not found on this RPC.");
 
     // tokens: symbol + decimals
+    const errMeta = rpcErrors;
     const meta = await multicall(TOKENS.flatMap((t) => [{ target: t.addr, data: SEL.symbol }, { target: t.addr, data: SEL.decimals }]));
+    if (rpcErrors > errMeta) throw new Error("Token lookups failed even after retries: the RPC is refusing requests. Set your own RPC first, e.g.\n  set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY");
     console.log("\nTokens (checked on-chain):");
     const line = [];
     TOKENS.forEach((t, i) => {
@@ -261,7 +271,9 @@ async function setup() {
         }
     }
     process.stdout.write(`\nLooking up pools for ${syms.length * (syms.length - 1) / 2} token pairs on ${dexes.length} DEXes (${calls.length} lookups)... `);
+    const errBefore = rpcErrors;
     const res = await multicall(calls);
+    const lookupFails = rpcErrors - errBefore;
     let found = 0;
     res.forEach((r, i) => {
         if (!r.success) return;
@@ -275,6 +287,12 @@ async function setup() {
         found++;
     });
     console.log(`${found} pools found.`);
+    if (lookupFails) {
+        console.log(`\n  WARNING: ${lookupFails} batches of pool lookups failed even after retries, so many pools are MISSING.`);
+        console.log(`  This usually means the free public RPCs are refusing requests. Set your own RPC first, e.g.:`);
+        console.log(`    set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY`);
+        if (!process.env.RPC_URL) throw new Error("Stopping: pool discovery incomplete (RPC_URL is not set).");
+    }
 }
 
 // ------------------------------------------------------------ routes ----
