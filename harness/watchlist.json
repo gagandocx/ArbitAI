@@ -31,5 +31,9 @@
   "base_delay_ms": 250,
   "max_delay_ms": 5000,
   "net_threshold_usd": 0.5,
-  "sizes": [1000, 5000, 20000, 100000]
+  "sizes": [1000, 5000, 20000, 100000],
+  "gas_units": 450000,
+  "eth_usd": 2500,
+  "l1_fee_usd": 0,
+  "stale_ms": 0
 }

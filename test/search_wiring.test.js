@@ -14,6 +14,8 @@ import {
   grossToBps,
   dexPairLabel,
   buildObservation,
+  gasUsdFromWei,
+  DEFAULT_GAS_UNITS,
 } from '../sim/search_scan.mjs';
 import { allMarketKeys, selectMarkets, loadScoreboard } from '../harness/search_once.mjs';
 import { emptyScoreboard, updateScoreboard } from '../sim/scoreboard.mjs';
@@ -192,16 +194,70 @@ test('buildObservation shapes a cycleOut result into an observation', () => {
   const dexB = { dex: 'sushi', pool: '0xB' };
   const plan = { quoteIsStable: true, decBase: 18 };
   const best = { dir: 'A->B', net: 12.5, baseUsd: 2500 };
-  const obs = buildObservation({ market, dexA, dexB, plan, best, block: 999, sizeUsd: 1000 });
+  const obs = buildObservation({ market, dexA, dexB, plan, best, block: 999, sizeUsd: 1000, gasUsd: 2 });
   assert.equal(obs.chain, 'arbitrum');
   assert.equal(obs.pair, 'WETH/USDC');
   assert.equal(obs.dexPair, 'sushi<->uniswap');
-  assert.equal(obs.grossUsd, 12.5);
-  assert.equal(obs.gapBps, 125); // 12.5/1000 * 10000
+  assert.equal(obs.grossUsd, 12.5); // PRE-gas cross-DEX gap
+  assert.equal(obs.gasUsd, 2);
+  assert.equal(obs.netUsd, 10.5); // HONEST net-of-gas = gross - gas
+  assert.equal(obs.gapBps, 125); // gross-based: 12.5/1000 * 10000
   assert.equal(obs.block, 999);
   assert.equal(obs.baseAddr, '0xb');
   assert.equal(obs.quoteAddr, '0xq');
   assert.deepEqual(obs.pools, { uniswap: '0xA', sushi: '0xB' });
+
+  // default gasUsd (0) -> netUsd == grossUsd (no silent subtraction)
+  const noGas = buildObservation({ market, dexA, dexB, plan, best, block: 1, sizeUsd: 1000 });
+  assert.equal(noGas.gasUsd, 0);
+  assert.equal(noGas.netUsd, 12.5);
+});
+
+// ---------------------------------------------------------------------------
+// gas haircut: gasUsdFromWei mirrors the watcher's (gasPrice*units)/1e18*ethUsd + l1.
+// ---------------------------------------------------------------------------
+test('gasUsdFromWei mirrors the watcher gas model and degrades safely', () => {
+  // 0.1 gwei gas price, 450000 gas units, $2500/ETH, no L1 fee.
+  const gwei = 100000000n; // 0.1 gwei in wei
+  const usd = gasUsdFromWei({ gasPriceWei: gwei, gasUnits: DEFAULT_GAS_UNITS, ethUsd: 2500, l1FeeUsd: 0 });
+  const expected = (Number(gwei * 450000n) / 1e18) * 2500; // = 0.1125
+  assert.ok(Math.abs(usd - expected) < 1e-9, `got ${usd}, expected ${expected}`);
+
+  // a flat L1 fee is added on top
+  const withL1 = gasUsdFromWei({ gasPriceWei: gwei, gasUnits: 450000n, ethUsd: 2500, l1FeeUsd: 0.02 });
+  assert.ok(Math.abs(withL1 - (expected + 0.02)) < 1e-9);
+
+  // zero / missing gas price -> just the flat L1 fee, never NaN, never negative
+  assert.equal(gasUsdFromWei({ gasPriceWei: 0n, l1FeeUsd: 0 }), 0);
+  assert.equal(gasUsdFromWei({ gasPriceWei: 0n, l1FeeUsd: 0.05 }), 0.05);
+  assert.equal(gasUsdFromWei({}), 0);
+});
+
+// ---------------------------------------------------------------------------
+// HONESTY: a pre-gas-POSITIVE but post-gas-NEGATIVE observation must NOT be nominated.
+// The driver compares obs.netUsd (net-of-gas) against the threshold, so a gross gap
+// that gas eats is correctly rejected (would_confirm=false, net_usd records the loss).
+// ---------------------------------------------------------------------------
+test('a gross-positive but gas-negative gap is NOT nominated and net_usd is honest', () => {
+  const market = { chain: 'arbitrum', pair: { base: 'WETH', quote: 'USDC', baseAddr: '0xb', quoteAddr: '0xq' } };
+  const dexA = { dex: 'uniswap', pool: '0xA' };
+  const dexB = { dex: 'sushi', pool: '0xB' };
+  const plan = { quoteIsStable: true, decBase: 18 };
+  // gross gap $0.30, gas haircut $0.80 -> net -$0.50
+  const best = { dir: 'A->B', net: 0.3, baseUsd: 2500 };
+  const obs = buildObservation({ market, dexA, dexB, plan, best, block: 10, sizeUsd: 1000, gasUsd: 0.8 });
+  assert.equal(obs.grossUsd, 0.3);
+  assert.ok(obs.netUsd < 0, `net-of-gas is negative, got ${obs.netUsd}`);
+
+  const netThresholdUsd = 0.5;
+  const wouldConfirm = obs.netUsd >= netThresholdUsd; // the driver's exact gate
+  assert.equal(wouldConfirm, false, 'a gas-negative gap is not nominated');
+
+  const row = buildGapsHistoryRow({ timestamp: 't', obs, netUsd: obs.netUsd, wouldConfirm });
+  const cols = row.split(',');
+  assert.equal(cols[5], '0.3000'); // gross_gap_usd stays gross
+  assert.equal(cols[6], '-0.5000'); // net_usd is the HONEST net-of-gas loss
+  assert.equal(cols[7], 'false'); // would_confirm false
 });
 
 // ---------------------------------------------------------------------------
@@ -261,6 +317,7 @@ test('scanMarket produces an observation via a mock read-only RPC', async () => 
 
   function handle(method, params) {
     if (method === 'eth_blockNumber') return uintWord(1000);
+    if (method === 'eth_gasPrice') return uintWord(0); // 0 wei -> gas haircut is just l1FeeUsd (0)
     if (method !== 'eth_call') throw new Error('unexpected method ' + method);
     const to = params[0].to.toLowerCase();
     const data = params[0].data;

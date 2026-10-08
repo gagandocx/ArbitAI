@@ -149,10 +149,14 @@ markets (enabled chains x available-token pairs x the DEX set), (2) picks a smal
 batch** biased to the highest-gap markets while round-robining the long tail (never starving a
 market), (3) **auto-discovers** each DEX's V3 pool via the factory's read-only
 `getPool(tokenA,tokenB,fee)` (`eth_call`, selector `0x1698ee82`) - so you do NOT hand-enter pools,
-(4) reads cross-DEX quotes on a few recent blocks and records the net gap, (5) updates a
+(4) reads cross-DEX quotes on a few recent blocks and, per block, reads the live gas price
+(read-only `eth_gasPrice`) to subtract an **honest gas haircut** - so `gaps_history.csv` records
+`gross_gap_usd` (PRE-gas) and a genuine net-of-gas `net_usd` (same gas model as the two-DEX
+watcher: `(gasPrice*GAS_UNITS)/1e18*ETH_USD + L1_FEE_USD`), and a gross gap eaten by gas shows a
+NEGATIVE `net_usd` and is NOT nominated, (5) updates a
 **persistent scoreboard** (`harness/scoreboard.json`) and appends to an append-only
 `harness/gaps_history.csv`, (6) prints a **ranked top-gaps research report** (Markdown table), and
-(7) for any observation crossing `net_threshold_usd`, assembles the **generalized fork-confirm**
+(7) for any observation whose net-of-gas `net_usd` crosses `net_threshold_usd`, assembles the **generalized fork-confirm**
 env for the EXISTING `WethUsdcCycle` test (base->`WETH`, quote->`USDC`, discovered
 pools->`POOL_A/POOL_B/POOL_C`). It throttles between calls and **backs off on HTTP 429 without
 crashing**, so a WIDE search runs SLOWLY by design on a free RPC tier. It is MEASUREMENT ONLY:

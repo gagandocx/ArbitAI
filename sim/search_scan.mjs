@@ -12,8 +12,10 @@
  *      SAME-PAIR mode (detectShape + cycleOut),
  *   3) samples a few recent blocks and computes the best net cross-DEX gap at the
  *      configured sizes,
- *   4) returns one observation per pairing { chain, pair, dexPair, gapUsd, gapBps,
- *      netUsd, grossUsd, block, pools, ... }.
+ *   4) reads the live gas price (read-only eth_gasPrice) for each sampled block and
+ *      subtracts a gas haircut (same model as the two-DEX watcher), and
+ *   5) returns one observation per pairing { chain, pair, dexPair, gapUsd, gapBps,
+ *      grossUsd (PRE-gas gap), gasUsd, netUsd (HONEST net-of-gas), block, pools, ... }.
  *
  * PACING: it THROTTLES between calls using a delay from sim/backoff.mjs
  * decideScanDelayMs, and on a fetch error that sim/backoff.mjs isRateLimited flags it
@@ -131,6 +133,32 @@ export function grossToBps(grossUsd, startUsd) {
     return (grossUsd / startUsd) * 10000;
 }
 
+// ----------------------------------------------------- gas haircut (pure) ----
+// Default gas model, mirroring the two-DEX watcher's onBlock() estimate so the search
+// nets a candidate the SAME way the watcher does: a 2-hop flash-loan arb costs about
+// GAS_UNITS gas, paid in ETH, converted to USD at ethUsd, plus a flat L1 data fee.
+export const DEFAULT_GAS_UNITS = 450000n; // 2-hop flash-loan arb incl. Morpho (watcher default)
+export const DEFAULT_ETH_USD = 2500;      // approx ETH price used for the gas->USD conversion
+export const DEFAULT_L1_FEE_USD = 0;      // L1 data fee (approx; 0 on Arbitrum, small on Base)
+
+// gasUsdFromWei({ gasPriceWei, gasUnits, ethUsd, l1FeeUsd }) -> estimated gas cost in USD
+// for one cross-DEX cycle. PURE. gasPriceWei is a BigInt|string|number (wei); the result
+// matches the watcher's `(gasPrice * GAS_UNITS)/1e18 * ethUsd + L1_FEE_USD`. A missing or
+// unreadable gas price yields just the flat l1FeeUsd (never NaN, never negative).
+export function gasUsdFromWei({ gasPriceWei = 0n, gasUnits = DEFAULT_GAS_UNITS, ethUsd = DEFAULT_ETH_USD, l1FeeUsd = DEFAULT_L1_FEE_USD } = {}) {
+    let wei;
+    try {
+        wei = typeof gasPriceWei === "bigint" ? gasPriceWei : BigInt(gasPriceWei || 0);
+    } catch {
+        wei = 0n;
+    }
+    if (wei < 0n) wei = 0n;
+    const units = typeof gasUnits === "bigint" ? gasUnits : BigInt(Math.max(0, Math.floor(Number(gasUnits) || 0)));
+    const ethGas = Number(wei * units) / 1e18; // gas paid in ETH
+    const usd = ethGas * (Number(ethUsd) || 0) + (Number(l1FeeUsd) || 0);
+    return usd > 0 ? usd : (Number(l1FeeUsd) || 0);
+}
+
 // dexPairLabel(dexA, dexB) -> a stable "a<->b" label (sorted) for the scoreboard key.
 export function dexPairLabel(dexA, dexB) {
     const [a, b] = [String(dexA).toLowerCase(), String(dexB).toLowerCase()].sort();
@@ -189,12 +217,19 @@ async function discoverMarketPools({ market, rpc, blockTag, delayState }) {
 }
 
 // ----------------------------------------------------- observation builder (pure) ----
-// buildObservation({ market, dexA, dexB, plan, best, block }) -> the observation object
-// the scoreboard + history consume. PURE: it only shapes already-computed numbers, so
-// the test suite exercises it directly against a mock cycleOut result.
-export function buildObservation({ market, dexA, dexB, plan, best, block, sizeUsd }) {
+// buildObservation({ market, dexA, dexB, plan, best, block, sizeUsd, gasUsd }) -> the
+// observation object the scoreboard + history consume. PURE: it only shapes
+// already-computed numbers, so the test suite exercises it directly against a mock
+// cycleOut result. `gasUsd` is the gas haircut (USD) for `block`, read from
+// eth_gasPrice by scanMarket and passed in here; grossUsd is the PRE-gas cross-DEX gap
+// (cycleOut is net-of-fees but pre-gas) and netUsd is the HONEST net-of-gas figure the
+// threshold/report use. gapBps stays on the gross so the scoreboard ranks markets by
+// raw opportunity size independent of the per-block gas estimate.
+export function buildObservation({ market, dexA, dexB, plan, best, block, sizeUsd, gasUsd = 0 }) {
     const dexPair = dexPairLabel(dexA.dex, dexB.dex);
     const grossUsd = best ? best.net : 0; // cycleOut returns net USD PRE-gas = the gross cross-DEX gap
+    const gas = Number(gasUsd) || 0;
+    const netUsd = grossUsd - gas;         // genuine net-of-gas: gross minus the eth_gasPrice haircut
     const gapBps = grossToBps(grossUsd, sizeUsd);
     return {
         chain: market.chain,
@@ -203,7 +238,8 @@ export function buildObservation({ market, dexA, dexB, plan, best, block, sizeUs
         gapUsd: grossUsd,
         gapBps,
         grossUsd,
-        netUsd: grossUsd, // net-of-gas is applied by the driver using eth_gasPrice; pre-gas here
+        gasUsd: gas,
+        netUsd, // HONEST net-of-gas (grossUsd - gasUsd); fed to the threshold + the net_usd CSV column
         block,
         sizeUsd,
         dir: best ? best.dir : null,
@@ -223,10 +259,16 @@ export function buildObservation({ market, dexA, dexB, plan, best, block, sizeUs
 
 // ----------------------------------------------------- scan one market (I/O) ----
 // scanMarket({ market, rpc, sizes, blocksPerMarket, baseDelayMs, maxDelayMs,
-//              gasUsdPerBlock, delayState }) -> array of observations (best per pairing
-// across the sampled blocks). Throttles between calls; backs off and continues on 429.
+//              gasUnits, ethUsd, l1FeeUsd, delayState }) -> array of observations (best
+// per pairing across the sampled blocks). Throttles between calls; backs off and
+// continues on 429. For each sampled block it reads the live gas price via the
+// read-only eth_gasPrice method (already in ALLOWED) and subtracts a gas haircut so the
+// observation's netUsd is a GENUINE net-of-gas figure (the gross cross-DEX gap is kept
+// separately). On a gas-price read error it degrades to the flat l1FeeUsd (never crashes).
 export async function scanMarket({ market, rpc, sizes = [1000], blocksPerMarket = 2,
-    baseDelayMs = 250, maxDelayMs = 5000, delayState } = {}) {
+    baseDelayMs = 250, maxDelayMs = 5000,
+    gasUnits = DEFAULT_GAS_UNITS, ethUsd = DEFAULT_ETH_USD, l1FeeUsd = DEFAULT_L1_FEE_USD,
+    delayState } = {}) {
     const state = delayState || { recent429: 0, attempt: 0, current: baseDelayMs, baseDelayMs, maxDelayMs };
 
     // latest block number (read-only)
@@ -257,11 +299,34 @@ export async function scanMarket({ market, rpc, sizes = [1000], blocksPerMarket 
         const quoteFn = makeQuoteFn(batchFn, blockTag);
         const decimalsFn = (t) => decimalsAt(batchFn, t, blockTag);
 
+        // Per-block gas haircut (read-only eth_gasPrice). The netUsd we record and the
+        // threshold the driver checks are net-OF-GAS, mirroring the two-DEX watcher. A
+        // gas-price read failure degrades to the flat l1FeeUsd rather than aborting the
+        // block (a 429 is additionally backed off below).
+        let gasUsd = Number(l1FeeUsd) || 0;
+        try {
+            const [gp] = await batchFn([["eth_gasPrice", []]]);
+            gasUsd = gasUsdFromWei({ gasPriceWei: BigInt(gp || "0x0"), gasUnits, ethUsd, l1FeeUsd });
+        } catch (e) {
+            if (isRateLimited(e)) {
+                state.recent429++;
+                await sleep(nextBackoffMs({ attempt: state.attempt++, baseMs: baseDelayMs, maxMs: maxDelayMs }));
+            }
+            // keep the flat l1FeeUsd haircut and carry on scanning this block
+        }
+
         for (const [dexA, dexB] of combos) {
             let poolX, poolY, plan;
             try {
                 poolX = await loadPoolAt(batchFn, dexA.pool, dexA.quoter, blockTag);
                 poolY = await loadPoolAt(batchFn, dexB.pool, dexB.quoter, blockTag);
+                // SAMPLING SEAM: pools are DISCOVERED once at "latest" (above) but tokens
+                // and quotes are read at the sampled historical block (latest-k). A pool
+                // created AFTER the sampled block did not exist then, so token0/fee read
+                // empty here and we skip this pairing for this block. That is the correct
+                // fail mode (skip, never crash), but note: a dropped pairing is NOT the
+                // same as a measured zero gap. It simply was not observable at this block,
+                // and leaves no row (rather than a misleading 0) in the output.
                 if (!poolX.fee || !poolY.fee) continue; // not a readable V3 pool at this block
                 plan = await detectShape(poolX, poolY, { decimalsFn });
             } catch (e) {
@@ -292,7 +357,7 @@ export async function scanMarket({ market, rpc, sizes = [1000], blocksPerMarket 
             }
             if (!best) continue;
 
-            const obs = buildObservation({ market, dexA, dexB, plan, best, block: blockNum, sizeUsd: bestSize });
+            const obs = buildObservation({ market, dexA, dexB, plan, best, block: blockNum, sizeUsd: bestSize, gasUsd });
             const prev = bestByPair.get(obs.dexPair);
             if (!prev || obs.gapUsd > prev.gapUsd) bestByPair.set(obs.dexPair, obs);
         }

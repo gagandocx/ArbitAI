@@ -10,7 +10,9 @@
  *       (exploit top-ranked + explore least-recently/never-seen),
  *   (4) scans each selected market read-only (throttle + 429 backoff in search_scan),
  *   (5) updateScoreboard with every observation and persists the board back to disk,
- *   (6) appends one row per observation to the append-only harness/gaps_history.csv,
+ *   (6) appends one row per observation to the append-only harness/gaps_history.csv
+ *       (gross_gap_usd = PRE-gas cross-DEX gap; net_usd = HONEST net-of-gas, after the
+ *       scanner's eth_gasPrice haircut),
  *   (7) prints the ranked top-gaps research table (sim/gaps.mjs),
  *   (8) for any observation whose net_usd >= net_threshold_usd, assembles the env for
  *       the EXISTING WethUsdcCycle fork test and prints a fork-confirm plan — claiming
@@ -139,9 +141,19 @@ export async function runCycle(opts = {}) {
     const maxDelayMs = Number(watchlist.max_delay_ms || 5000);
     const netThresholdUsd = Number(env.NET_THRESHOLD_USD || watchlist.net_threshold_usd || 0.5);
     const sizes = Array.isArray(watchlist.sizes) && watchlist.sizes.length ? watchlist.sizes.map(Number) : [1000];
+    // Gas-haircut knobs (the search nets a candidate the SAME way the watcher does:
+    // subtract an eth_gasPrice-based gas estimate before the threshold). Defaults mirror
+    // the two-DEX watcher (450000 gas units, ~$2500/ETH, flat L1 fee ~0 on Arbitrum).
+    const gasUnits = BigInt(Math.max(0, Math.floor(Number(env.GAS_UNITS || watchlist.gas_units || 450000))));
+    const ethUsd = Number(env.ETH_USD || watchlist.eth_usd || 2500);
+    const l1FeeUsd = Number(env.L1_FEE_USD || watchlist.l1_fee_usd || 0);
+    // staleMs cutoff for the EXPLORE phase: a market not seen within stale_ms before now
+    // is treated as maximally stale (forced into the explore slots). 0 = disabled (the
+    // never-seen -Infinity path still guarantees long-tail coverage). Documented knob.
+    const staleMs = Number(env.STALE_MS || watchlist.stale_ms || 0);
 
     let board = loadScoreboard(scoreboardPath);
-    const selected = selectMarkets(board, markets, { batchSize, now });
+    const selected = selectMarkets(board, markets, { batchSize, now, staleMs });
 
     const ts = new Date(now).toISOString();
     const historyRows = [];
@@ -165,7 +177,7 @@ export async function runCycle(opts = {}) {
 
         let observations = [];
         try {
-            observations = await scanMarket({ market, rpc, sizes, blocksPerMarket, baseDelayMs, maxDelayMs });
+            observations = await scanMarket({ market, rpc, sizes, blocksPerMarket, baseDelayMs, maxDelayMs, gasUnits, ethUsd, l1FeeUsd });
         } catch (e) {
             // scanMarket already swallows 429s; a stray error here is logged, not fatal
             log(`  [warn] scan ${market.chain} ${market.pair.base}/${market.pair.quote} errored: ${e.message}`);

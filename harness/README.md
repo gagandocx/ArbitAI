@@ -81,6 +81,13 @@ the scanner calls that DEX's **V3 factory `getPool(tokenA, tokenB, fee)`** (read
 `eth_call`, selector `0x1698ee82`) once per fee tier and keeps the non-zero pool(s). A
 non-existent pool simply returns `address(0)` and is skipped - harmless and visible.
 
+**Sampling seam (by design):** pool addresses are discovered once at `latest`, then
+tokens and quotes are read at the sampled historical block (`latest - k`). A pool created
+**after** the sampled block did not exist then, so its reads come back empty and that
+pairing is **skipped for that block** (never a crash). A dropped pairing is not the same
+as a measured zero gap - it simply was not observable at that block and leaves no row
+(rather than a misleading `0`) in `gaps_history.csv`.
+
 The factory and quoter addresses come from `sim/dex_registry.mjs`, which labels each one
 **VERIFIED** or **UNVERIFIED**:
 
@@ -105,6 +112,14 @@ picks a small **adaptive batch**: it biases toward the **highest-gap markets** (
 while **round-robining the least-recently-seen / never-seen markets** (explore) so the
 long tail is never starved. The scoreboard persists across restarts, so stopping and
 relaunching just continues the same series.
+
+The explore phase always treats a **never-seen** market as maximally stale, so new
+markets are picked up immediately regardless of any cutoff. An **optional** `stale_ms`
+knob (env `STALE_MS`, watchlist `stale_ms`, default `0` = off) additionally forces any
+market **not seen within `stale_ms` before now** into the explore slots, so a long run
+re-visits markets it has not measured in a while even when fresher markets exist. With
+the default `0` the cutoff is inactive and coverage comes from the never-seen path plus
+least-recently-seen ordering.
 
 ## S4. Rate-limit safety on a free tier
 
@@ -166,9 +181,16 @@ This prints a Markdown table ranked by best gap:
 Each cycle also appends one row per observation to the append-only
 `harness/gaps_history.csv`
 (columns: `timestamp,chain,pair,dex_pair,block,gross_gap_usd,net_usd,would_confirm`),
-so the raw series accumulates for later analysis.
+so the raw series accumulates for later analysis. The two money columns are **honest
+about gas**: `gross_gap_usd` is the PRE-gas cross-DEX gap (`cycleOut` is net-of-fees but
+pre-gas), and `net_usd` is the **genuine net-of-gas** figure after the scanner subtracts
+a live gas haircut. For each sampled block the scanner reads the live gas price
+(read-only `eth_gasPrice`) and subtracts the same gas estimate the two-DEX watcher uses
+(`(gasPrice * GAS_UNITS)/1e18 * ETH_USD + L1_FEE_USD`, defaults 450000 units, ~$2500/ETH,
+flat L1 fee ~0 on Arbitrum). So a gap that looks positive gross but is eaten by gas shows
+a **negative `net_usd`** and is **not** nominated.
 
-When an observation's `net_usd` crosses `net_threshold_usd`, the cycle assembles the
+When an observation's `net_usd` (net-of-gas) crosses `net_threshold_usd`, the cycle assembles the
 `WethUsdcCycle` fork-test env for it. For a **WETH/USDC-shaped** pair (18-dec base + a
 stablecoin quote) it prints a **CONFIRMABLE** plan (base->`WETH`, quote->`USDC`, the
 discovered pools->`POOL_A/POOL_B/POOL_C`) and, in the loop, a loud `STRONG CANDIDATE` /
@@ -188,7 +210,11 @@ All optional except at least one chain RPC URL. Defaults shown are what the code
 | `LOOP_INTERVAL_MIN` | 10 | Minutes the loop sleeps between cycles. |
 | `BATCH_SIZE` | 4 | Markets scanned per cycle (overrides `watchlist.batch_size`). |
 | `BLOCKS_PER_MARKET` | 2 | Recent blocks sampled per market (overrides `watchlist.blocks_per_market`). |
-| `NET_THRESHOLD_USD` | 0.5 | Net gap (USD) that triggers a fork-confirm plan (overrides `watchlist.net_threshold_usd`). |
+| `NET_THRESHOLD_USD` | 0.5 | **Net-of-gas** gap (USD) that triggers a fork-confirm plan (overrides `watchlist.net_threshold_usd`). |
+| `GAS_UNITS` | 450000 | Gas units assumed for one 2-hop cross-DEX cycle in the gas haircut (overrides `watchlist.gas_units`). |
+| `ETH_USD` | 2500 | ETH price (USD) used to convert the live gas price to USD (overrides `watchlist.eth_usd`). |
+| `L1_FEE_USD` | 0 | Flat L1 data-fee estimate (USD) added to the gas haircut (overrides `watchlist.l1_fee_usd`; ~0 on Arbitrum). |
+| `STALE_MS` | 0 | Explore-phase stale cutoff (ms): a market not seen within this window before now is forced into the explore slots. 0 = disabled; never-seen markets are still always covered (overrides `watchlist.stale_ms`). |
 | `MAX_CYCLES` | 0 | 0 = run forever; set a number to cap cycles (useful for tests). |
 | `SKIP_FORGE` | 1 | Reserved. The loop never runs `forge` itself; fork-confirmation is user-side. |
 
@@ -198,10 +224,14 @@ Throttle/backoff knobs live in `harness/watchlist.json` (not env):
 | --- | --- | --- |
 | `base_delay_ms` | 250 | Baseline inter-call spacing. |
 | `max_delay_ms` | 5000 | Cap on the throttle/backoff delay when 429s appear. |
-| `net_threshold_usd` | 0.5 | Default net-gap threshold (env `NET_THRESHOLD_USD` overrides). |
+| `net_threshold_usd` | 0.5 | Default **net-of-gas** gap threshold (env `NET_THRESHOLD_USD` overrides). |
 | `batch_size` | 4 | Default batch size (env `BATCH_SIZE` overrides). |
 | `blocks_per_market` | 2 | Default blocks per market (env `BLOCKS_PER_MARKET` overrides). |
 | `sizes` | `[1000, 5000, 20000, 100000]` | USD notionals at which each cross-DEX cycle is evaluated. |
+| `gas_units` | 450000 | Gas units for the per-block gas haircut (env `GAS_UNITS` overrides). |
+| `eth_usd` | 2500 | ETH price for the gas->USD conversion (env `ETH_USD` overrides). |
+| `l1_fee_usd` | 0 | Flat L1 data-fee estimate added to the gas haircut (env `L1_FEE_USD` overrides). |
+| `stale_ms` | 0 | Explore-phase stale cutoff in ms; 0 = disabled (env `STALE_MS` overrides). |
 
 ## S7. How to add a new chain or pair
 
