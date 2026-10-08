@@ -140,6 +140,59 @@ pool is PRE-FILLED (its quoter still needs filling), and the PancakeSwap pool/qu
 PLACEHOLDERS the harness refuses to run against until you supply the real Arbitrum addresses from
 DEX Screener.
 
+**NEWEST WAY OF WORKING - the smarter autonomous search (supersedes hand-run single-market).**
+Instead of hand-entering three pool addresses for ONE pair on ONE chain, there is now a
+self-running search over a whole **watchlist** of chains, pairs, and DEXes that **auto-discovers**
+the pools and learns where the gaps are. Configure `harness/watchlist.json` once, then launch
+`harness/search_loop.sh` and leave it. Each cycle it: (1) expands the watchlist to concrete
+markets (enabled chains x available-token pairs x the DEX set), (2) picks a small **adaptive
+batch** biased to the highest-gap markets while round-robining the long tail (never starving a
+market), (3) **auto-discovers** each DEX's V3 pool via the factory's read-only
+`getPool(tokenA,tokenB,fee)` (`eth_call`, selector `0x1698ee82`) - so you do NOT hand-enter pools,
+(4) reads cross-DEX quotes on a few recent blocks and records the net gap, (5) updates a
+**persistent scoreboard** (`harness/scoreboard.json`) and appends to an append-only
+`harness/gaps_history.csv`, (6) prints a **ranked top-gaps research report** (Markdown table), and
+(7) for any observation crossing `net_threshold_usd`, assembles the **generalized fork-confirm**
+env for the EXISTING `WethUsdcCycle` test (base->`WETH`, quote->`USDC`, discovered
+pools->`POOL_A/POOL_B/POOL_C`). It throttles between calls and **backs off on HTTP 429 without
+crashing**, so a WIDE search runs SLOWLY by design on a free RPC tier. It is MEASUREMENT ONLY:
+read-only quotes plus the user-run fork simulation, no key custody, no transactions, no funding.
+
+New file layout for the smarter search:
+- `sim/dex_registry.mjs` - per-chain x DEX factory/quoter/tiers + VERIFIED/UNVERIFIED flags, and
+  the canonical `TOKENS` map per chain.
+- `sim/discovery.mjs` - read-only factory `getPool` pool auto-discovery.
+- `sim/scoreboard.mjs` - persistent scoreboard + adaptive `selectBatch`.
+- `sim/gaps.mjs` - ranked top-gaps aggregation + Markdown table.
+- `sim/backoff.mjs` - 429 detection, exponential backoff, adaptive scan-delay throttle.
+- `sim/search_scan.mjs` - the read-only scanner (ALLOWED set exactly
+  `eth_blockNumber`/`eth_call`/`eth_gasPrice`/`eth_chainId`).
+- `harness/watchlist.json` - the search space (RPC via per-chain env var `rpc_env`, never a key).
+- `harness/watchlist.mjs` - pure load/expand/validate + `validate`/`expand`/`get` CLI.
+- `harness/search_once.mjs` - one adaptive cycle (I/O glue) + a `top-gaps` sub-command.
+- `harness/search_loop.sh` - the continuous wrapper (nohup-safe, SIGINT-clean, loud ALERT banner).
+- `harness/scoreboard.json`, `harness/gaps_history.csv` - runtime artifacts (gitignored).
+
+Launch it (full usage in `harness/README.md`, the "Smarter autonomous search" section):
+```
+export ARBITRUM_RPC_URL=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+export BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+nohup bash harness/search_loop.sh >> harness/search_loop.out 2>&1 &
+```
+Read the ranked report any time WITHOUT scanning:
+`node harness/search_once.mjs top-gaps harness/scoreboard.json`.
+
+User-verifiable default addresses (DO NOT fund on these blindly): the **three Arbitrum V3
+factories** in `sim/dex_registry.mjs` (Uniswap `0x1F98431c...`, Pancake `0x41ff9AA7...`, Sushi
+`0x1af415a1...`) are UNVERIFIED, overridable defaults - **confirm each on Arbiscan or the DEX's
+official docs before a live run** (a wrong factory just returns `address(0)`, so it fails loud).
+All **Base** factories/quoters and **every per-DEX QuoterV2** are VERIFIED (from
+`sim/base_live_check.mjs` / context). Fork-confirm shape limitation: the `WethUsdcCycle` test
+assumes an 18-dec `WETH`-ish base against a ~6-dec stablecoin `USDC`-ish quote, so only such pairs
+are **CONFIRMABLE** by env alone; a **non-standard-shape pair** (e.g. `WBTC` 8-dec base, or a
+non-stable quote) **cannot be generically fork-confirmed yet** - the harness assembles the env but
+degrades it to **UNCONFIRMED/SKIPPED** and never claims REAL without a tailored test.
+
 **Honest standing conclusion:** no capturable edge found for a buildable same-chain flash-loan bot;
 apparent gaps are artifacts or shallow-pool mirages; real profit is a sub-second latency race against
 colocated bots. Keep testing, but confirm EVERY signal with real-swap fork execution, and never fund
