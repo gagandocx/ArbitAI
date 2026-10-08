@@ -59,6 +59,19 @@ contract ArbExecutorV2 {
 
     function setExecutor(address a, bool ok) external onlyOwner { executor[a] = ok; }
 
+    uint256 private constant MAX = type(uint256).max;
+    mapping(address => bool) public morphoApproved;
+
+    // PRE-APPROVAL OPTIMIZATION: set a one-time max allowance to Morpho for each
+    // flash-loan asset so the hot path (run/onMorphoFlashLoan) does ZERO approvals.
+    // Call once per asset after deploy. This is the real, legitimate version of the
+    // "pre-approve to cut transactions" tip — our swaps use direct-pool callbacks
+    // and need no approvals at all, so this one allowance is the only approval left.
+    function preApprove(address asset) external onlyOwner {
+        IERC20(asset).approve(address(morpho), MAX);
+        morphoApproved[asset] = true;
+    }
+
     /*
      * Run a cyclic arbitrage.
      * @param startToken  token to flash-borrow and to profit in (cycle start == end)
@@ -103,8 +116,13 @@ contract ArbExecutorV2 {
         // repay Morpho: it pulls `assets` back via safeTransferFrom after this
         // callback returns, so we must leave an allowance. Reset-then-set to be
         // safe with tokens that disallow non-zero->non-zero approval changes.
-        IERC20(startToken).approve(address(morpho), 0);
-        IERC20(startToken).approve(address(morpho), assets);
+        // If the asset was pre-approved once (preApprove), the max allowance already
+        // covers repayment -> ZERO approvals on the hot path (gas saving). Otherwise
+        // fall back to the safe reset-then-set per run.
+        if (!morphoApproved[startToken]) {
+            IERC20(startToken).approve(address(morpho), 0);
+            IERC20(startToken).approve(address(morpho), assets);
+        }
     }
 
     event HopResult(uint256 index, uint256 amountIn, uint256 amountOut);
