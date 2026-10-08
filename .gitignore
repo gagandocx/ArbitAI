@@ -7,3 +7,8 @@ keeper_replica_*.csv
 base_live_log.csv
 base_routes_log.csv
 arb_recon_log.csv
+arb-v2/out/
+arb-v2/cache/
+arb-v2/lib/
+arb_recon_clean.csv
+arb_recon_big.csv
