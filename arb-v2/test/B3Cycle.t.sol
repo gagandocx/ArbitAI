@@ -24,9 +24,9 @@ import {IERC20, IV3Pool} from "../src/interfaces.sol";
 contract B3CycleTest is Test {
     address constant B3   = 0x07b3D902783c3C12b077508c3B5c00113d1291D0;
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address constant USDT = 0xfdE4C96c8593536e31F229EA8f37b2ADa2699bb2;
-    address constant POOL_USDC = 0x2df380544B88aDb3Ad0A94100dCc45FD705aaE2d; // B3/USDC
-    address constant POOL_USDT = 0xf411dBF5978cE4089cf40ef7b83f813eFD312FB0; // B3/USDT
+    address constant USDT = 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2;
+    address constant POOL_USDC = 0x2df380544b88adb3ad0a94100dcc45fd705aae2d; // B3/USDC
+    address constant POOL_USDT = 0xf411dbf5978ce4089cf40ef7b83f813efd312fb0; // B3/USDT
 
     // transient state for the swap callback
     address private payToken;
