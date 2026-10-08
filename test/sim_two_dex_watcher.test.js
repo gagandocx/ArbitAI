@@ -6,6 +6,8 @@ import {
   cycleOut,
   loadPool,
   tokenDecimals,
+  chainConfig,
+  checkPool,
 } from '../sim/live_two_dex_watcher.mjs';
 
 // ---------------------------------------------------------------------------
@@ -252,6 +254,112 @@ test('loadPool and tokenDecimals decode an in-process mock RPC (global.fetch)', 
 
     assert.equal(await tokenDecimals(FAKE.WETH), 18);
     assert.equal(await tokenDecimals(FAKE.USDC), 6);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// chainConfig(): selects per-chain chainId, Uniswap QuoterV2, canonical WETH/USDC,
+// and the stablecoin set. Default is base (preserves existing behavior); arbitrum is
+// supported; an unknown chain throws a clear error.
+// ---------------------------------------------------------------------------
+test('chainConfig selects per-chain chainId, quoter, WETH/USDC, and stables', () => {
+  const base = chainConfig('base');
+  assert.equal(base.name, 'base');
+  assert.equal(base.chainId, '0x2105');
+  assert.equal(base.weth, '0x4200000000000000000000000000000000000006');
+  assert.equal(base.usdc, '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913');
+  assert.ok(base.stables.has(base.usdc), 'base USDC is in the stable set');
+  // quoter is the Base Uniswap QuoterV2, lowercased
+  assert.equal(base.quoter, '0x3d4e44eb1374240ce5f1b871ab261cd16335b76a');
+
+  const arb = chainConfig('arbitrum');
+  assert.equal(arb.name, 'arbitrum');
+  assert.equal(arb.chainId, '0xa4b1');
+  assert.equal(arb.weth, '0x82af49447d8a07e3bd95bd0d56f35241523fbab1');
+  assert.equal(arb.usdc, '0xaf88d065e77c8cc2239327c5edb3a432268e5831');
+  assert.ok(arb.stables.has(arb.usdc), 'arbitrum native USDC is in the stable set');
+  assert.equal(arb.quoter, '0x61ffe014ba17989e743c5f6cb21bf9697530b21e');
+
+  // default (no arg) is base, preserving existing behavior
+  assert.equal(chainConfig().name, 'base');
+  assert.equal(chainConfig('BASE').name, 'base', 'chain name is case-insensitive');
+
+  assert.throws(() => chainConfig('optimism'), /Unknown --chain/);
+});
+
+// ---------------------------------------------------------------------------
+// checkPool(): the --check preflight verdict logic, exercised against an in-process
+// mock RPC. Builds a global.fetch stub that answers token0/token1/fee per pool, then
+// asserts the ✅/❌ verdict for: a real WETH/USDC pool, a pasted TOKEN address (no
+// fee/token0), a wrong-chain pool, and a wrong-pair pool.
+// ---------------------------------------------------------------------------
+test('checkPool verdicts: real pool, pasted token, wrong chain, wrong pair', async () => {
+  const arb = chainConfig('arbitrum');
+  const base = chainConfig('base');
+
+  const SEL = { token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43' };
+  const strip = (h) => h.replace(/^0x/, '');
+  const asWord = (hex) => '0x' + strip(hex).toLowerCase().padStart(64, '0');
+  const uintWord = (n) => '0x' + BigInt(n).toString(16).padStart(64, '0');
+
+  // FAKE pool addresses (test fixtures, not real). Each maps to its token0/token1/fee.
+  const GOOD_POOL = '0xaaa0000000000000000000000000000000000001'; // WETH/USDC on arbitrum
+  const WRONGPAIR = '0xaaa0000000000000000000000000000000000002'; // WETH/USDT (not USDC)
+  const BASEPOOL  = '0xaaa0000000000000000000000000000000000003'; // Base WETH/USDC (wrong chain for arb)
+  // The Arbitrum USDC *token* pasted as a pool: an ERC-20 has no token0()/fee().
+  const TOKEN_ADDR = arb.usdc;
+
+  const POOLS = {
+    [GOOD_POOL]: { t0: arb.weth, t1: arb.usdc, fee: 500 },
+    [WRONGPAIR]: { t0: arb.weth, t1: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9', fee: 3000 }, // WETH/USDT
+    [BASEPOOL]:  { t0: base.weth, t1: base.usdc, fee: 500 },
+  };
+
+  const originalFetch = global.fetch;
+  global.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const reqs = Array.isArray(body) ? body : [body];
+    const out = reqs.map((r) => {
+      assert.equal(r.method, 'eth_call', 'checkPool only issues read-only eth_call');
+      const to = r.params[0].to.toLowerCase();
+      const sel = r.params[0].data.slice(0, 10);
+      const p = POOLS[to];
+      // A plain token (no entry in POOLS) returns 0x for every call -> firstUint null.
+      if (!p) return { jsonrpc: '2.0', id: r.id, result: '0x' };
+      let result = '0x';
+      if (sel === SEL.token0) result = asWord(p.t0);
+      else if (sel === SEL.token1) result = asWord(p.t1);
+      else if (sel === SEL.fee) result = uintWord(p.fee);
+      return { jsonrpc: '2.0', id: r.id, result };
+    });
+    return { ok: true, json: async () => (Array.isArray(body) ? out : out[0]) };
+  };
+
+  try {
+    // ✅ a real WETH/USDC V3 pool on the selected chain
+    const good = await checkPool(GOOD_POOL, arb);
+    assert.equal(good.ok, true, `GOOD_POOL should pass, got: ${good.reason}`);
+    assert.equal(good.t0, arb.weth);
+    assert.equal(good.t1, arb.usdc);
+    assert.equal(good.fee, 500);
+
+    // ❌ a pasted ERC-20 token address (no fee()/token0())
+    const token = await checkPool(TOKEN_ADDR, arb);
+    assert.equal(token.ok, false);
+    assert.match(token.reason, /not a V3 pool/);
+    assert.match(token.reason, /token address/);
+
+    // ❌ wrong chain: a Base WETH/USDC pool checked against arbitrum
+    const wrongChain = await checkPool(BASEPOOL, arb);
+    assert.equal(wrongChain.ok, false);
+    assert.match(wrongChain.reason, /wrong chain/);
+
+    // ❌ wrong pair: WETH/USDT on arbitrum (USDT is a stable but not canonical USDC)
+    const wrongPair = await checkPool(WRONGPAIR, arb);
+    assert.equal(wrongPair.ok, false);
+    assert.match(wrongPair.reason, /not canonical WETH\/USDC/);
   } finally {
     global.fetch = originalFetch;
   }

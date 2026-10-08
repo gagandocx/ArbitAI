@@ -42,6 +42,14 @@ import {IERC20, IV3Pool} from "../src/interfaces.sol";
  * To cover all three pairings WITHOUT POOL_C, run the A<->B test three times,
  * swapping env each run: (POOL_A=Uni,POOL_B=Pancake), (POOL_A=Uni,POOL_B=Sushi),
  * (POOL_A=Pancake,POOL_B=Sushi).
+ *
+ * ON ARBITRUM: WETH and USDC are read from env too, so point them at the canonical
+ * Arbitrum tokens and fork an Arbitrum RPC. The deep WETH/USDC pools (Uniswap V3,
+ * PancakeSwap V3, SushiSwap V3) live on Arbitrum, so this is the intended run:
+ *   export WETH=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1   # canonical WETH (Arbitrum)
+ *   export USDC=0xaf88d065e77c8cC2239327C5EDb3A432268e5831   # native USDC (Arbitrum)
+ *   export POOL_A=0x.. POOL_B=0x.. POOL_C=0xf3eb87c1f6020982173c908e7eb31aa66c1f0296
+ *   forge test --match-contract WethUsdcCycle --fork-url $ARB_RPC --fork-block-number <block> -vv
  */
 contract WethUsdcCycleTest is Test {
     // Canonical Base token addresses (well-known constants, overridable via env).

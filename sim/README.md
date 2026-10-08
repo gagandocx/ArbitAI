@@ -5,8 +5,13 @@ Requirements: **Node.js 18+**. No `npm install` needed.
 
 ## 0. Live two-DEX watcher (watch-only, deep WETH/USDC across three DEXes)
 
-`live_two_dex_watcher.mjs` watches one pair across its pools every new block. It auto-detects each
-pool's tokens and works in two modes:
+`live_two_dex_watcher.mjs` watches one pair across its pools every new block. It runs on **Base**
+(default) and **Arbitrum** via `--chain {base|arbitrum}`. The chosen chain selects the expected
+chainId (Base `0x2105`, Arbitrum `0xa4b1`), the Uniswap QuoterV2 address, the canonical WETH + USDC
+addresses, and the stablecoin set. The deep WETH/USDC pools across Uniswap V3, PancakeSwap V3 and
+SushiSwap V3 live on **Arbitrum**, so that is the intended target; omit `--chain` (or pass
+`--chain base`) to keep the original Base behavior unchanged. It auto-detects each pool's tokens and
+works in two modes:
 
 - **SAME-PAIR mode** (the deep use case): both pools share BOTH tokens, e.g. **WETH/USDC** on
   Uniswap V3 vs PancakeSwap V3 vs SushiSwap V3. The cycle is a clean 2-leg same-pair cross-DEX loop
@@ -22,29 +27,56 @@ live gas, and logs a **WOULD-FIRE** signal whenever a cycle would net more than 
 the same pair, the watcher evaluates all three DEX pairings per block (A<->B, A<->C, B<->C) and reports
 the best. Omit `--poolC` and it behaves as before (A<->B only).
 
-You must fetch the three pool addresses yourself from **DEX Screener** (dexscreener.com/base, search
-"WETH USDC"): the Uniswap V3, PancakeSwap V3 and SushiSwap V3 WETH/USDC pool addresses. These are not
-hardcoded; supply them via `--poolA/--poolB/--poolC`.
+You must fetch the three pool addresses yourself from **DEX Screener** for the chain you chose
+(dexscreener.com, pick Base or Arbitrum and search "WETH USDC"): the Uniswap V3, PancakeSwap V3 and
+SushiSwap V3 WETH/USDC pool addresses. These are not hardcoded; supply them via `--poolA/--poolB/--poolC`.
+One Arbitrum SushiSwap V3 WETH/USDC pool already identified is
+`0xf3eb87c1f6020982173c908e7eb31aa66c1f0296` (use as the Sushi `--poolC` example; still verify it with
+`--check`). The Uniswap and Pancake pool addresses remain yours to supply from DEX Screener.
+
+**Quoter caveat:** PancakeSwap V3 and SushiSwap V3 have their OWN quoter contracts, different from the
+Uniswap QuoterV2 this script defaults to. Quoting a Pancake/Sushi pool through the Uniswap quoter can
+mis-quote. Pass a per-pool quoter with `--quoterA/--quoterB/--quoterC` for a non-Uniswap pool; if you do
+not, the watcher prints a visible **WARNING** for that pool so you are not misled.
+
+**Preflight `--check`:** before a full run, pass `--check` to read each supplied pool ONCE and print, per
+pool, its `token0`/`token1`, fee tier, and a clear ✅/❌ verdict. ✅ means it is a real V3-style pool on
+the selected chain whose two tokens are that chain's canonical WETH + USDC. ❌ explains why (e.g. "not a
+V3 pool — did you paste a token address?", "wrong chain", "tokens are not canonical WETH/USDC"). It then
+exits WITHOUT starting the watch loop. This catches the classic mistake of pasting a TOKEN address (for
+example the Arbitrum USDC token `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`) where a POOL address is
+expected.
 
 It fires nothing: no wallet, no keys, no transactions. It answers the make-or-break question before any money
 is risked: *how often does a real, above-cost cross-DEX gap actually open on this pair?*
 
 ```sh
-# WETH/USDC across the three DEXes (addresses from DEX Screener, dexscreener.com/base):
-set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
-node sim/live_two_dex_watcher.mjs \
+# 1) PREFLIGHT the three Arbitrum pool addresses first (reads each once, verdicts, exits):
+set RPC_URL=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+node sim/live_two_dex_watcher.mjs --chain arbitrum --check \
   --poolA 0xUNISWAP_V3_WETH_USDC \
   --poolB 0xPANCAKE_V3_WETH_USDC \
-  --poolC 0xSUSHI_V3_WETH_USDC \
+  --poolC 0xf3eb87c1f6020982173c908e7eb31aa66c1f0296   # example Sushi V3 WETH/USDC on Arbitrum
+
+# 2) WETH/USDC across the three DEXes on Arbitrum (per-pool quoters recommended):
+node sim/live_two_dex_watcher.mjs --chain arbitrum \
+  --poolA 0xUNISWAP_V3_WETH_USDC --quoterA 0xUNISWAP_QUOTERV2 \
+  --poolB 0xPANCAKE_V3_WETH_USDC --quoterB 0xPANCAKE_QUOTERV2 \
+  --poolC 0xf3eb87c1f6020982173c908e7eb31aa66c1f0296 --quoterC 0xSUSHI_QUOTERV2 \
   --minutes 60
+
+# Base behavior is unchanged when --chain is omitted (or --chain base):
+node sim/live_two_dex_watcher.mjs \
+  --poolA 0xUNISWAP_V3_WETH_USDC --poolB 0xPANCAKE_V3_WETH_USDC --poolC 0xSUSHI_V3_WETH_USDC --minutes 60
 ```
 
-Options: `--min-profit-usd 0.10` (signal threshold, after gas), `--sizes 1000,5000,20000,100000`,
-`--poolA 0x..` / `--poolB 0x..` / `--poolC 0x..` / `--quoter 0x..` to watch a different pair or add a
-third DEX. Watch for a few hours (ideally across a volatile moment). The summary's **WOULD-FIRE signals**
-count is the opportunity rate; only if it is regularly non-zero is live execution worth considering. Then
-confirm any signal with the `arb-v2/test/WethUsdcCycle.t.sol` fork test (real swaps, all sizes) at the
-block where the watcher fired, before trusting it.
+Options: `--chain base|arbitrum` (default `base`), `--check` (preflight only, then exit),
+`--min-profit-usd 0.10` (signal threshold, after gas), `--sizes 1000,5000,20000,100000`,
+`--poolA 0x..` / `--poolB 0x..` / `--poolC 0x..`, `--quoter 0x..` (chain default Uniswap QuoterV2) and
+per-pool `--quoterA/--quoterB/--quoterC 0x..`. Watch for a few hours (ideally across a volatile moment).
+The summary's **WOULD-FIRE signals** count is the opportunity rate; only if it is regularly non-zero is
+live execution worth considering. Then confirm any signal with the `arb-v2/test/WethUsdcCycle.t.sol` fork
+test (real swaps, all sizes) at the block where the watcher fired, before trusting it.
 
 ## 0a. Multi-chain arbitrage recon + sweep (where is the edge?)
 

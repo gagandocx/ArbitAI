@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 /*
- * LIVE TWO-/THREE-DEX WATCHER (watch-only) — one pair across several DEX pools, on Base.
+ * LIVE TWO-/THREE-DEX WATCHER (watch-only) — one pair across several DEX pools.
+ *
+ * CHAINS: Base (default) and Arbitrum are supported via --chain {base|arbitrum}.
+ * The chain selects the expected chainId, the Uniswap QuoterV2 address, the
+ * canonical WETH + USDC addresses, and the stablecoin set. Everything below that
+ * documents "Base" applies equally to Arbitrum once --chain arbitrum is passed;
+ * the deep WETH/USDC pools the sales video pushes (Uniswap V3, PancakeSwap V3,
+ * SushiSwap V3) live on Arbitrum, so that is the intended target now.
  *
  * Primary use case: a DEEP major pair — WETH/USDC — traded on the SAME two tokens
- * across multiple DEXes (Uniswap V3, PancakeSwap V3, SushiSwap V3 on Base). Every
+ * across multiple DEXes (Uniswap V3, PancakeSwap V3, SushiSwap V3). Every
  * new block it computes, from REAL on-chain quotes, a clean 2-leg cross-DEX loop:
  *   USDC -> buy WETH on DEX A -> sell WETH on DEX B -> USDC   (and the reverse B->A)
  * at several trade sizes, keeps the best, subtracts the live gas cost, and logs a
@@ -28,56 +35,140 @@
  * "how often does a real, above-cost cross-DEX gap actually open on this pair?"
  * That is the make-or-break number to measure BEFORE risking a cent.
  *
- * SAFETY: read-only (eth_blockNumber / eth_call / eth_gasPrice / eth_chainId only).
- * Requirements: Node 18+. Use your Alchemy Base URL (RPC_URL) — public RPCs
- * rate-limit the per-block quoting.
+ * PREFLIGHT: pass --check to read each supplied pool ONCE, print its token0/token1,
+ * fee tier, and a clear ✅/❌ verdict (✅ only when it is a real V3-style pool on the
+ * selected chain whose two tokens are that chain's canonical WETH + USDC), then exit
+ * WITHOUT starting the per-block watch loop. Use this to catch a pasted TOKEN address
+ * (e.g. the Arbitrum USDC token mistaken for a pool), a wrong-chain pool, or a pool of
+ * the wrong pair before committing to a full run.
  *
- * POOL ADDRESSES ARE NOT HARDCODED FOR WETH/USDC. The three real Base WETH/USDC pool
+ * SAFETY: read-only (eth_blockNumber / eth_call / eth_gasPrice / eth_chainId only).
+ * Requirements: Node 18+. Use your Alchemy RPC URL for the selected chain (RPC_URL) —
+ * public RPCs rate-limit the per-block quoting.
+ *
+ * POOL ADDRESSES ARE NOT HARDCODED FOR WETH/USDC. The three real WETH/USDC pool
  * addresses (Uniswap V3, PancakeSwap V3, SushiSwap V3) must be supplied by YOU from
- * DEX Screener (https://dexscreener.com/base , search "WETH USDC"). The defaults below
- * are the legacy one-shared-token (B3) example and keep that path working; override
- * them for the WETH/USDC cross-DEX run.
+ * DEX Screener (https://dexscreener.com , pick the chain and search "WETH USDC"). The
+ * defaults below are the legacy one-shared-token (B3) Base example and keep that path
+ * working; override them for the WETH/USDC cross-DEX run.
+ *
+ * QUOTER CAVEAT: PancakeSwap V3 and SushiSwap V3 have their OWN quoter contracts, which
+ * are NOT the Uniswap QuoterV2 this script uses by default. Quoting a Pancake/Sushi pool
+ * through the Uniswap quoter can mis-quote. Pass a per-pool quoter (--quoterA/--quoterB/
+ * --quoterC) for a non-Uniswap pool; if you do not, the watcher prints a visible WARNING.
  *
  * Usage:
- *   set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
- *   # WETH/USDC across three DEXes (addresses from DEX Screener):
- *   node sim/live_two_dex_watcher.mjs --minutes 60 \
+ *   set RPC_URL=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+ *   # WETH/USDC across three DEXes on Arbitrum (addresses from DEX Screener):
+ *   node sim/live_two_dex_watcher.mjs --chain arbitrum --minutes 60 \
  *        --poolA 0xUNISWAP_V3_WETH_USDC --poolB 0xPANCAKE_V3_WETH_USDC --poolC 0xSUSHI_V3_WETH_USDC
- *   Options: --min-profit-usd 0.10  --sizes 1000,5000,20000,100000
- *            --poolA 0x..  --poolB 0x..  --poolC 0x..  --quoter 0x..  (override the defaults)
+ *   # preflight the pool addresses first (reads each pool once, prints a verdict, exits):
+ *   node sim/live_two_dex_watcher.mjs --chain arbitrum --check \
+ *        --poolA 0x.. --poolB 0x.. --poolC 0x..
+ *   Options: --chain base|arbitrum (default base)  --check (preflight only)
+ *            --min-profit-usd 0.10  --sizes 1000,5000,20000,100000
+ *            --poolA 0x..  --poolB 0x..  --poolC 0x..  --quoter 0x..
+ *            --quoterA 0x..  --quoterB 0x..  --quoterC 0x..  (per-pool Uniswap/Pancake/Sushi quoters)
  */
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf("--" + n); return i >= 0 ? args[i + 1] : d; };
+const flag = (n) => args.includes("--" + n);
+const lower = (a) => a.toLowerCase();
+
+// -------------------------------------------------- chain configuration ----
+// Per-chain constants: expected chainId, the Uniswap QuoterV2 deployment, the
+// canonical WETH + USDC addresses, the stablecoin set, and the default public RPCs
+// and approximate block time. QuoterV2 addresses are well-known Uniswap v3 periphery
+// deployments; a user who is unsure can always override with --quoter / --quoterA...
+// All addresses are stored lowercased for consistent comparisons.
+const CHAINS = {
+    base: {
+        name: "base",
+        chainId: "0x2105", // 8453
+        blockSec: 2,
+        l1FeeUsd: 0.02, // Base L1 data fee approx (0 on Arbitrum)
+        quoter: lower("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"), // Uniswap QuoterV2 on Base
+        weth: lower("0x4200000000000000000000000000000000000006"),   // canonical WETH on Base
+        usdc: lower("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),   // native USDC on Base
+        rpcs: ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://1rpc.io/base"],
+        stables: [
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
+            "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", // USDT
+            "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA", // USDbC
+            "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", // DAI
+        ],
+    },
+    arbitrum: {
+        name: "arbitrum",
+        chainId: "0xa4b1", // 42161
+        blockSec: 0.25, // Arbitrum blocks are sub-second; used only for the summary estimate
+        l1FeeUsd: 0.0, // L1 data fee is folded into gasPrice on Arbitrum
+        quoter: lower("0x61fFE014bA17989E743c5F6cB21bF9697530B21e"), // Uniswap QuoterV2 on Arbitrum (well-known; override with --quoter if unsure)
+        weth: lower("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),   // canonical WETH on Arbitrum
+        usdc: lower("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),   // native USDC on Arbitrum
+        rpcs: ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com", "https://1rpc.io/arb"],
+        stables: [
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // native USDC
+            "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8", // USDC.e (bridged)
+            "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", // USDT
+            "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1", // DAI
+        ],
+    },
+};
+
+// chainConfig(name) -> a frozen, normalized config for the selected chain. Throws a
+// clear error for an unknown chain. STABLES is a Set of lowercased addresses so the
+// quote-leg selection logic works unchanged. Exported for the test suite.
+function chainConfig(name) {
+    const key = String(name || "base").toLowerCase();
+    const c = CHAINS[key];
+    if (!c) throw new Error(`Unknown --chain "${name}". Supported: ${Object.keys(CHAINS).join(", ")}.`);
+    return {
+        name: c.name,
+        chainId: c.chainId,
+        blockSec: c.blockSec,
+        l1FeeUsd: c.l1FeeUsd,
+        quoter: c.quoter,
+        weth: c.weth,
+        usdc: c.usdc,
+        rpcs: c.rpcs,
+        stables: new Set(c.stables.map(lower)),
+    };
+}
+
+const CHAIN = chainConfig(opt("chain", "base"));
+const CHECK = flag("check"); // preflight-only mode: read each pool once, verdict, exit
+
 const MINUTES = Number(opt("minutes", 60));
 const MIN_PROFIT_USD = Number(opt("min-profit-usd", 0.10)); // after gas; threshold to call it a signal
 const SIZES = opt("sizes", "1000,5000,20000,100000").split(",").map(Number);
 const GAS_UNITS = BigInt(opt("gas-units", "450000")); // 2-hop flash-loan arb incl. Morpho
-const L1_FEE_USD = Number(opt("l1-fee-usd", "0.02"));  // Base L1 data fee approx
+const L1_FEE_USD = Number(opt("l1-fee-usd", String(CHAIN.l1FeeUsd))); // chain L1 data fee approx
 const LOG_FILE = opt("log", "two_dex_watch.csv");
-const RPCS = process.env.RPC_URL ? [process.env.RPC_URL]
-    : ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://1rpc.io/base"];
+const RPCS = process.env.RPC_URL ? [process.env.RPC_URL] : CHAIN.rpcs;
 
 // ---- proven hotspot pools on Base (legacy B3 one-shared-token example) ----
 // For the WETH/USDC cross-DEX use case these MUST be overridden with the three real
-// Base pool addresses (Uniswap V3, PancakeSwap V3, SushiSwap V3) from DEX Screener —
+// pool addresses (Uniswap V3, PancakeSwap V3, SushiSwap V3) from DEX Screener —
 // they are deliberately NOT hardcoded here. The watcher AUTO-DETECTS each pool's
 // tokens, so it works both for two pools sharing BOTH tokens (SAME-PAIR mode) and for
 // two pools sharing one base token against two quotes (legacy ONE-SHARED-TOKEN mode).
-const lower = (a) => a.toLowerCase();
-const QUOTER = lower(opt("quoter", "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")); // Uniswap QuoterV2 on Base
+const QUOTER = lower(opt("quoter", CHAIN.quoter)); // Uniswap QuoterV2 for the selected chain
+// Per-pool quoters: Pancake V3 and Sushi V3 have their OWN quoter contracts (NOT the
+// Uniswap QuoterV2). Supply one here for a non-Uniswap pool; otherwise it falls back to
+// QUOTER and a visible WARNING is printed (quoting through the wrong quoter mis-quotes).
+const QUOTER_A = opt("quoterA", null) ? lower(opt("quoterA", null)) : null;
+const QUOTER_B = opt("quoterB", null) ? lower(opt("quoterB", null)) : null;
+const QUOTER_C = opt("quoterC", null) ? lower(opt("quoterC", null)) : null;
 const POOL_A = lower(opt("poolA", "0xf411dbf5978ce4089cf40ef7b83f813efd312fb0")); // legacy #1 pool (B3/USDT)
 const POOL_B = lower(opt("poolB", "0x2df380544b88adb3ad0a94100dcc45fd705aae2d")); // legacy #2 pool (B3/USDC)
 const POOL_C = opt("poolC", null) ? lower(opt("poolC", null)) : null;            // optional 3rd DEX pool (WETH/USDC)
-// stablecoins we treat as ~$1 and freely convertible (used to pick the quote leg)
-const STABLES = new Set([
-    lower("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC
-    lower("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"), // USDT
-    lower("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"), // USDbC
-    lower("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"), // DAI
-]);
+// stablecoins we treat as ~$1 and freely convertible (used to pick the quote leg).
+// Driven by the selected chain's config so SAME-PAIR mode picks the right USDC.
+const STABLES = CHAIN.stables;
 
 const SEL = { slot0: "0x3850c7bd", token0: "0x0dfe1681", token1: "0xd21220a7", fee: "0xddca3f43",
     decimals: "0x313ce567", quote: "0xc6a5026a" };
@@ -94,7 +185,7 @@ async function post(body) {
             return await r.json();
         } catch (e) { rpcErr++; rpcIdx++; await new Promise((x) => setTimeout(x, 800)); }
     }
-    throw new Error("All RPC endpoints failed. Set RPC_URL to your Alchemy Base URL.");
+    throw new Error(`All RPC endpoints failed. Set RPC_URL to your Alchemy ${CHAIN.name} URL.`);
 }
 async function batch(calls) {
     for (const [m] of calls) if (!ALLOWED.has(m)) throw new Error("blocked method " + m);
@@ -136,6 +227,84 @@ async function loadPool(addr, batchFn = batch) {
 async function tokenDecimals(token, batchFn = batch, dflt = 18) {
     const [d] = await batchFn([["eth_call", [{ to: token, data: SEL.decimals }, "latest"]]]);
     return Number(firstUint(d) ?? BigInt(dflt));
+}
+
+// ----------------------------------------------------- preflight --check ----
+// Read ONE pool and return a verdict object against the selected chain's config.
+// This is a PURE function (pass batchFn + cfg) so it is testable against the mock RPC.
+//   ok:true  -> a real V3-style pool whose two tokens are the chain's canonical
+//               WETH + USDC (order-independent).
+//   ok:false -> reason explains why (not a V3 pool / token pasted / wrong pair).
+// It does NOT verify the chainId itself (the caller does that once up front); the
+// "wrong chain" class of error is surfaced by the up-front eth_chainId guard and by a
+// pool whose tokens are not THIS chain's WETH/USDC.
+// Returns { addr, ok, t0, t1, fee, reason }.
+async function checkPool(addr, cfg, batchFn = batch) {
+    const a = lower(addr);
+    let t0, t1, f;
+    try {
+        [t0, t1, f] = await batchFn([
+            ["eth_call", [{ to: a, data: SEL.token0 }, "latest"]],
+            ["eth_call", [{ to: a, data: SEL.token1 }, "latest"]],
+            ["eth_call", [{ to: a, data: SEL.fee }, "latest"]],
+        ]);
+    } catch (e) {
+        return { addr: a, ok: false, t0: null, t1: null, fee: 0, reason: `RPC read failed: ${e.message}` };
+    }
+    const fee = Number(firstUint(f) ?? 0n);
+    // A V3 pool answers token0()/token1()/fee(). A plain ERC-20 TOKEN address (a common
+    // paste mistake) has no fee()/token0() and returns 0x / null -> we catch that here.
+    if (!t0 || t0 === "0x" || !t1 || t1 === "0x" || !fee) {
+        return {
+            addr: a, ok: false, t0: t0 ? addrW(t0) : null, t1: t1 ? addrW(t1) : null, fee,
+            reason: "not a V3 pool — no fee()/token0()/token1() — did you paste a token address instead of a pool?",
+        };
+    }
+    const tok0 = addrW(t0), tok1 = addrW(t1);
+    const toks = new Set([tok0, tok1]);
+    const isWethUsdc = toks.has(cfg.weth) && toks.has(cfg.usdc);
+    if (!isWethUsdc) {
+        // Distinguish a wrong-chain pool (tokens are some OTHER chain's WETH/USDC) from
+        // a simply wrong-pair pool, to make the message actionable.
+        const hasOtherChainTok = Object.values(CHAINS).some(
+            (c) => c.name !== cfg.name && (toks.has(c.weth) || toks.has(c.usdc))
+        );
+        const reason = hasOtherChainTok
+            ? `wrong chain — tokens look like another chain's WETH/USDC, not ${cfg.name}'s (expected WETH ${cfg.weth} + USDC ${cfg.usdc})`
+            : `tokens are not canonical WETH/USDC on ${cfg.name} (expected WETH ${cfg.weth} + USDC ${cfg.usdc})`;
+        return { addr: a, ok: false, t0: tok0, t1: tok1, fee, reason };
+    }
+    return { addr: a, ok: true, t0: tok0, t1: tok1, fee, reason: `✅ real V3 WETH/USDC pool on ${cfg.name} (fee ${fee})` };
+}
+
+// Run the preflight on every supplied pool, print per-pool token0/token1 + fee + a
+// clear ✅/❌ verdict, and return true only when ALL supplied pools pass. Does NOT start
+// the watch loop. The chainId is validated by the caller before this runs.
+async function runCheck(cfg) {
+    const supplied = [["A", POOL_A, QUOTER_A], ["B", POOL_B, QUOTER_B]];
+    if (POOL_C) supplied.push(["C", POOL_C, QUOTER_C]);
+
+    console.log(`PREFLIGHT --check on ${cfg.name} (expected chainId ${cfg.chainId})`);
+    console.log(`  canonical WETH=${cfg.weth}  USDC=${cfg.usdc}`);
+    let allOk = true;
+    for (const [label, addr, quoter] of supplied) {
+        const v = await checkPool(addr, cfg);
+        const mark = v.ok ? "✅" : "❌";
+        console.log(`\nPool ${label} ${v.addr}`);
+        console.log(`  token0=${v.t0 ?? "(none)"}`);
+        console.log(`  token1=${v.t1 ?? "(none)"}`);
+        console.log(`  fee=${v.fee || "(none)"}`);
+        console.log(`  ${mark} ${v.reason}`);
+        if (v.ok && !quoter) {
+            console.log("  NOTE: no per-pool --quoter" + label + " set; this pool will be quoted through the Uniswap");
+            console.log("        QuoterV2. If it is a PancakeSwap/SushiSwap pool, pass --quoter" + label + " <its quoter> for correct quotes.");
+        }
+        if (!v.ok) allOk = false;
+    }
+    console.log("\n" + (allOk
+        ? "PREFLIGHT PASSED ✅ — all pools are real WETH/USDC V3 pools on " + cfg.name + ". Safe to run the watcher."
+        : "PREFLIGHT FAILED ❌ — fix the ❌ pools above before a full run."));
+    return allOk;
 }
 
 // ----------------------------------------------------- shape detection ----
@@ -269,16 +438,23 @@ const RUNTIME = { pools: [], pairings: [] };
 
 async function discover() {
     const chainId = await rpc("eth_chainId", []);
-    if (chainId !== "0x2105") throw new Error(`Expected Base (0x2105), got ${chainId}. Point RPC_URL at Base.`);
+    if (chainId !== CHAIN.chainId) {
+        throw new Error(`Expected ${CHAIN.name} (${CHAIN.chainId}), got ${chainId}. ` +
+            `Point RPC_URL at ${CHAIN.name} or pass the matching --chain.`);
+    }
 
     const addrs = [POOL_A, POOL_B];
     const labels = ["A", "B"];
-    if (POOL_C) { addrs.push(POOL_C); labels.push("C"); }
+    const quoters = [QUOTER_A, QUOTER_B];
+    if (POOL_C) { addrs.push(POOL_C); labels.push("C"); quoters.push(QUOTER_C); }
 
     const pools = [];
     for (let i = 0; i < addrs.length; i++) {
         const p = await loadPool(addrs[i]);
-        p.quoter = QUOTER; p.label = labels[i];
+        // Per-pool quoter: use --quoterX when supplied, else the chain's Uniswap QuoterV2.
+        p.quoter = quoters[i] ?? QUOTER;
+        p.quoterIsDefault = !quoters[i];
+        p.label = labels[i];
         pools.push(p);
     }
     RUNTIME.pools = pools;
@@ -293,8 +469,15 @@ async function discover() {
     }
 
     // ---- report ----
+    console.log(`Chain: ${CHAIN.name} (chainId ${CHAIN.chainId}). QuoterV2 default ${QUOTER}.`);
     for (const p of pools) {
-        console.log(`Pool ${p.label} ${p.addr} fee ${p.fee}  tokens=${p.t0},${p.t1}`);
+        console.log(`Pool ${p.label} ${p.addr} fee ${p.fee}  tokens=${p.t0},${p.t1}  quoter=${p.quoter}${p.quoterIsDefault ? " (Uniswap default)" : " (per-pool)"}`);
+        if (p.quoterIsDefault) {
+            // Pancake V3 and Sushi V3 have their OWN quoters. If this pool is one of those
+            // and we are using the Uniswap QuoterV2, quotes for it may be WRONG.
+            console.log(`  WARNING: pool ${p.label} is quoted through the Uniswap QuoterV2. If it is a PancakeSwap V3 or`);
+            console.log(`           SushiSwap V3 pool, pass --quoter${p.label} <that DEX's quoter> or its quotes may be wrong.`);
+        }
     }
     for (const pr of RUNTIME.pairings) {
         const { plan } = pr;
@@ -353,7 +536,7 @@ async function onBlock(bn) {
 }
 
 function summary() {
-    const hrs = (STATS.blocks * 2) / 3600; // Base ~2s blocks
+    const hrs = (STATS.blocks * CHAIN.blockSec) / 3600; // chain-specific block time
     const poolList = RUNTIME.pools.map((p) => `${p.label}=${p.addr.slice(0, 10)}`).join(" ");
     console.log("\n" + "=".repeat(80));
     console.log(`WATCH-ONLY SUMMARY — pools ${poolList}`);
@@ -368,6 +551,21 @@ function summary() {
 }
 
 async function main() {
+    // --check preflight: validate the chainId once, then read each pool ONCE, print a
+    // ✅/❌ verdict per pool, and EXIT without starting the watch loop.
+    if (CHECK) {
+        const chainId = await rpc("eth_chainId", []);
+        if (chainId !== CHAIN.chainId) {
+            console.log(`PREFLIGHT --check on ${CHAIN.name} (expected chainId ${CHAIN.chainId})`);
+            console.log(`\n❌ wrong chain — RPC reports chainId ${chainId}, expected ${CHAIN.chainId} for ${CHAIN.name}.`);
+            console.log(`   Point RPC_URL at ${CHAIN.name} or pass the matching --chain.`);
+            console.log("\nPREFLIGHT FAILED ❌");
+            process.exit(1);
+        }
+        const ok = await runCheck(CHAIN);
+        process.exit(ok ? 0 : 1);
+    }
+
     await discover();
     if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,pair,dir,size_usd,gross_usd,gas_usd,net_usd,would_fire\n");
     const pairDesc = RUNTIME.pairings.map((p) => p.label).join(", ");
@@ -392,4 +590,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
 }
 
 // Exported for the in-process mock-RPC test suite (test/sim_two_dex_watcher.test.js).
-export { detectShape, cycleOut, loadPool, tokenDecimals, firstUint, addrW, quoteCall, STABLES };
+export { detectShape, cycleOut, loadPool, tokenDecimals, firstUint, addrW, quoteCall, STABLES,
+    chainConfig, checkPool, CHAINS };

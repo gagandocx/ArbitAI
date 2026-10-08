@@ -22,9 +22,11 @@ Under `sim/` (Node, zero-dep, read-only — no wallet/keys/txs):
   Detects real on-chain arbs, ranks pools/cycles, measures TRUSTWORTHY profit. Has artifact filters:
   flags relays (profit >25% of cycled volume) and >$100k values. **Use this to measure any chain.**
 - `chain_sweep.mjs` — runs recon across several chains, prints one comparison table.
-- `live_two_dex_watcher.mjs` — live watch-only detector for ONE pair across TWO pools. Auto-detects
-  pool tokens, computes flash-loan cycle profit at several sizes, charges a 3rd-leg (stable↔stable)
-  cost (`--stable-leg-bps`), logs WOULD-FIRE signals. Fires nothing.
+- `live_two_dex_watcher.mjs` — live watch-only detector for ONE pair across TWO or THREE pools. Runs on
+  Base (default) or Arbitrum via `--chain {base|arbitrum}`. Auto-detects pool tokens, computes flash-loan
+  cycle profit at several sizes, charges a 3rd-leg (stable↔stable) cost (`--stable-leg-bps`), logs
+  WOULD-FIRE signals. Has a `--check` preflight that verdicts each pool (real V3 WETH/USDC on the chosen
+  chain?) and exits. Fires nothing.
 - `live_mainnet_check.mjs`, `base_live_check.mjs`, `realistic_market_sim.js`, `keeper_replica.mjs` —
   earlier Ethereum/Base scanners and the offline market sim + a faithful replica of Code.txt's keeper.
 
@@ -73,22 +75,39 @@ with a flash loan. Cross-chain needs real capital on both sides (real risk, no f
 
 ## 6. Where we are & the NEXT STEP
 
-Last actions: reworked `live_two_dex_watcher.mjs` so it now handles the DEEP same-pair cross-DEX case
-across the three big DEXes. It has a SAME-PAIR mode (both pools share BOTH tokens, e.g. WETH/USDC:
-quote USDC is the stable, base WETH is 18-dec and read from chain, and there is NO cross-stable 3rd-leg
-haircut) alongside the legacy ONE-SHARED-TOKEN (B3) mode, plus a `--poolC` option that evaluates all
-three DEX pairings per block (A<->B, A<->C, B<->C). Added a new fork test `arb-v2/test/WethUsdcCycle.t.sol`
-that confirms a WETH/USDC signal with REAL swaps at all sizes, mirroring the `B3Cycle.t.sol` pattern but
-for the 2-leg same-pair cycle (USDC -> WETH on DEX A -> USDC on DEX B) with no 3rd stable leg. Its pool
-addresses are user-supplied via env (`POOL_A`, `POOL_B`, optional `POOL_C`), never fabricated.
+Last actions: made `live_two_dex_watcher.mjs` **multi-chain** and added a **preflight check**. It now
+supports `--chain {base|arbitrum}` (default `base`, so existing Base behavior is unchanged); the chosen
+chain selects the expected chainId (Base `0x2105`, Arbitrum `0xa4b1`), the Uniswap QuoterV2 address, the
+canonical WETH + USDC addresses, and the stablecoin set, and the old hard-coded Base chainId guard now
+validates against the selected chain. A new `--check` preflight reads each supplied pool ONCE, prints its
+`token0`/`token1`, fee tier, and a clear ✅/❌ verdict (✅ only for a real V3-style pool on the selected
+chain whose two tokens are that chain's canonical WETH + USDC), then exits WITHOUT watching; it catches a
+pasted TOKEN address (e.g. the Arbitrum USDC token mistaken for a pool), a wrong-chain pool, and a
+wrong-pair pool. Per-pool quoters `--quoterA/--quoterB/--quoterC` were added because Pancake V3 and Sushi
+V3 use their OWN quoter contracts (not the Uniswap QuoterV2); a pool left on the Uniswap default prints a
+visible WARNING. The read-only invariant is intact (ALLOWED still exactly
+`eth_blockNumber`/`eth_call`/`eth_gasPrice`/`eth_chainId`). This all sits on top of the earlier SAME-PAIR
+vs ONE-SHARED-TOKEN modes and the `--poolC` three-DEX coverage. The `arb-v2/test/WethUsdcCycle.t.sol` fork
+test is unchanged in logic but now documents an Arbitrum run (override `WETH`/`USDC` env to the canonical
+Arbitrum tokens).
 
-**Immediate next step requested:** fetch the three WETH/USDC pool addresses from DEX Screener
-(dexscreener.com/base, search "WETH USDC"): the Uniswap V3, PancakeSwap V3, and SushiSwap V3 pool
-addresses. Then run the watcher across all three pairings:
-`node sim/live_two_dex_watcher.mjs --poolA <uni> --poolB <pancake> --poolC <sushi> --minutes 60`
-and confirm any WOULD-FIRE signal with the new `WethUsdcCycle` fork test (real swaps, all sizes) at the
-firing block:
-`cd arb-v2 && forge install foundry-rs/forge-std --no-commit && export BASE_RPC=... POOL_A=0x... POOL_B=0x... POOL_C=0x... && forge test --match-contract WethUsdcCycle --fork-url $BASE_RPC --fork-block-number <block> -vv`.
+**Immediate next step requested:** the deep WETH/USDC pools (Uniswap V3, PancakeSwap V3, SushiSwap V3) are
+on **Arbitrum**. Fetch the three WETH/USDC pool addresses from DEX Screener (dexscreener.com/arbitrum,
+search "WETH USDC"); the Sushi V3 WETH/USDC pool `0xf3eb87c1f6020982173c908e7eb31aa66c1f0296` is a known
+example for `--poolC`, the Uniswap and Pancake addresses are yours to supply. Then:
+
+1. PREFLIGHT the addresses:
+   `node sim/live_two_dex_watcher.mjs --chain arbitrum --check --poolA <uni> --poolB <pancake> --poolC 0xf3eb87c1f6020982173c908e7eb31aa66c1f0296`
+   (fix any ❌ before running; this is where a pasted token address gets caught).
+2. RUN the watcher across all three pairings (per-pool quoters recommended for Pancake/Sushi):
+   `node sim/live_two_dex_watcher.mjs --chain arbitrum --poolA <uni> --quoterA <uni-quoter> --poolB <pancake> --quoterB <pancake-quoter> --poolC 0xf3eb87c1f6020982173c908e7eb31aa66c1f0296 --quoterC <sushi-quoter> --minutes 60`
+3. CONFIRM any WOULD-FIRE signal with the `WethUsdcCycle` fork test (real swaps, all sizes) at the firing
+   block, using the canonical Arbitrum WETH/USDC tokens:
+   `cd arb-v2 && forge install foundry-rs/forge-std --no-commit && export ARB_RPC=... WETH=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1 USDC=0xaf88d065e77c8cC2239327C5EDb3A432268e5831 POOL_A=0x... POOL_B=0x... POOL_C=0xf3eb87c1f6020982173c908e7eb31aa66c1f0296 && forge test --match-contract WethUsdcCycle --fork-url $ARB_RPC --fork-block-number <block> -vv`.
+
+Note on the QuoterV2 addresses: the Base QuoterV2 is the proven `0x3d4e...B76a`; the Arbitrum QuoterV2 is
+set to the well-known Uniswap v3 periphery deployment `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` but is
+overridable with `--quoter` if you want to verify it against the live chain first.
 
 **Other honest options:** (1) backrun-opportunity analyzer (does a large swap trigger each arb, and how
 big is the post-swap gap — probes intra-block timing, the real edge); (2) scan a newer/less-saturated

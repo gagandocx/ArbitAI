@@ -79,6 +79,26 @@ To cover all three pairings without `POOL_C`, run the A<->B test three times, sw
 `(POOL_A=Uni, POOL_B=Pancake)`, `(POOL_A=Uni, POOL_B=Sushi)`, `(POOL_A=Pancake, POOL_B=Sushi)`. If
 `POOL_C` is set, `testWethUsdcCycleThreeDex` runs all three pairings in one invocation.
 
+### Running it on Arbitrum
+
+The test reads `WETH`, `USDC`, `POOL_A/B/C` from env, so it works on any chain by overriding the token
+addresses and forking that chain. For **Arbitrum**, set the canonical Arbitrum WETH and native USDC
+tokens and fork an Arbitrum archive RPC:
+
+```sh
+cd arb-v2
+forge install foundry-rs/forge-std --no-commit
+export ARB_RPC=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+export WETH=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1   # canonical WETH on Arbitrum
+export USDC=0xaf88d065e77c8cC2239327C5EDb3A432268e5831   # native USDC on Arbitrum
+export POOL_A=0xUNISWAP_V3_WETH_USDC POOL_B=0xPANCAKE_V3_WETH_USDC
+export POOL_C=0xf3eb87c1f6020982173c908e7eb31aa66c1f0296   # example Sushi V3 WETH/USDC on Arbitrum
+forge test --match-contract WethUsdcCycle --fork-url $ARB_RPC --fork-block-number <block> -vv
+```
+
+The pool addresses are still user-supplied from DEX Screener (dexscreener.com/arbitrum, search
+"WETH USDC"); only WETH/USDC change to the Arbitrum canonical tokens above.
+
 ## What the result decides
 
 - If V2 reproduces a meaningful share of the > $20 arbs on the fork → the strategy is sound;
