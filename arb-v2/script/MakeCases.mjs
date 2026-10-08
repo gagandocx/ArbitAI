@@ -62,27 +62,58 @@ async function buildCase(row) {
 
     const rcpt = await rpc("eth_getTransactionReceipt", [txh]);
     if (!rcpt || !rcpt.logs) return null;
-    // the two V3 swap logs, in execution order
-    const swaps = rcpt.logs.filter((l) => l.topics[0] === T_V3 || l.topics[0] === T_V2);
-    if (swaps.length !== 2) return null;               // keep it exact for now
+    const swaps = rcpt.logs.filter((l) => l.topics[0] === T_V3);  // 2-pool V3 only, first cut
+    if (swaps.length !== 2) return null;
 
-    // decode each V3 swap: data = amount0,amount1,sqrtP,liq,tick (first two are int256)
-    const hops = [];
-    let startToken = null, amountIn = null;
+    // Decode each swap into {pool, inToken, outToken, inAmt, zeroForOne}.
+    // Positive amount = token flowing INTO the pool (what the trader pays);
+    // negative = token flowing OUT (what the trader receives).
+    const legs = [];
     for (const s of swaps) {
         const pool = s.address.toLowerCase();
         const { token0, token1 } = await poolTokens(pool);
-        if (s.topics[0] !== T_V3) return null;         // skip v2-mixed for the first cut
         const d = strip(s.data);
         const amount0 = sint(d.slice(0, 64));
         const amount1 = sint(d.slice(64, 128));
-        // positive delta = token coming INTO the pool (what we pay); negative = out
-        const zeroForOne = amount0 > 0n;
-        const tokenIn = zeroForOne ? token0 : token1;
-        const inAmt = zeroForOne ? amount0 : amount1;
-        if (startToken === null) { startToken = tokenIn; amountIn = inAmt.toString(); }
-        hops.push({ pool, zeroForOne, tokenIn });
+        if (amount0 === 0n && amount1 === 0n) return null;
+        const zeroForOne = amount0 > 0n;                 // token0 in, token1 out
+        const inToken = zeroForOne ? token0 : token1;
+        const outToken = zeroForOne ? token1 : token0;
+        const inAmt = zeroForOne ? amount0 : -amount1 < 0n ? amount0 : amount0; // input is the positive one
+        const inPos = amount0 > 0n ? amount0 : amount1;  // the positive (paid) amount
+        legs.push({ pool, zeroForOne, inToken, outToken, inAmt: inPos });
     }
+
+    // Verify it's a clean 2-pool cycle: the two legs must share both tokens
+    // (A->B on one pool, B->A on the other).
+    const sameCycle = (legs[0].outToken === legs[1].inToken && legs[1].outToken === legs[0].inToken);
+    if (!sameCycle) return null;
+
+    // The START token is the one the arbitrageur flash-borrows and profits in.
+    // The recon CSV gives it: `token` (col 5) is the known symbol or raw address of
+    // the net-positive token. Map known symbols back to addresses; else it's a 0x addr.
+    const SYM2ADDR = {
+        USDC: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        WETH: "0x4200000000000000000000000000000000000006",
+        USDT: "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",
+        USDbC: "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",
+        DAI: "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+        cbBTC: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+    };
+    let startToken = SYM2ADDR[token] || (token && token.startsWith("0x") ? token.toLowerCase() : null);
+    // Fallback: if the CSV token isn't one of our pools' tokens, pick whichever of
+    // the two cycle tokens matches; otherwise default to leg0's inToken.
+    const cycleTokens = [legs[0].inToken, legs[0].outToken];
+    if (!startToken || !cycleTokens.includes(startToken)) startToken = legs[0].inToken;
+
+    // Order the hops so hop0 PAYS the start token.
+    const first = legs[0].inToken === startToken ? legs[0] : legs[1];
+    const second = first === legs[0] ? legs[1] : legs[0];
+    const ordered = [first, second];
+
+    const amountIn = ordered[0].inAmt.toString();
+    const hops = ordered.map((l) => ({ pool: l.pool, zeroForOne: l.zeroForOne, tokenIn: l.inToken }));
+
     return {
         block: Number(block), txHash: txh, startToken, amountIn,
         realProfitUsd: Number(profitUsd), cycle, hopsLen: hops.length, hops,
