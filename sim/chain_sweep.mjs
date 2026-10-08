@@ -6,7 +6,7 @@
  * (artifacts removed, 2-3 pool routes), per block? We scan each chain for a short
  * window and rank them. Whichever wins, we then go deep there.
  *
- * Read-only (delegates to arb_recon.mjs, which is read-only). No wallet/keys/txs.
+ * Read-only (delegates to arb_recon.mjs, which is read-only). No key custody/txs.
  *
  * Public RPCs rate-limit hard on full-block reads, so defaults are modest. For a
  * real comparison, give each chain its own RPC via env:

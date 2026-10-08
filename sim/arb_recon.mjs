@@ -18,7 +18,7 @@
  * target in Phase 2/3, instead of guessing.
  *
  * SAFETY: read-only (eth_getLogs / eth_getBlockByNumber / eth_getTransactionReceipt
- * / eth_blockNumber / eth_chainId only). No wallet, no key, no transactions.
+ * / eth_blockNumber / eth_chainId only). No key custody, no transactions.
  *
  * Requirements: Node 18+. A real RPC is strongly recommended (set RPC_URL) because
  * this reads full blocks and receipts; public endpoints will rate-limit.

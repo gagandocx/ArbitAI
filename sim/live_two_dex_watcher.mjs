@@ -24,7 +24,7 @@
  * (A<->B, A<->C, B<->C) and reports the best net, labeling which DEX pair fired. When
  * --poolC is omitted it behaves exactly as before (A<->B only).
  *
- * It fires NOTHING. No wallet, no key material, no transactions. It only answers:
+ * It fires NOTHING. No key custody, no key material, no transactions. It only answers:
  * "how often does a real, above-cost cross-DEX gap actually open on this pair?"
  * That is the make-or-break number to measure BEFORE risking a cent.
  *
@@ -156,7 +156,11 @@ async function detectShape(poolX, poolY, { decimalsFn, stables = STABLES } = {})
         // SAME-PAIR: both tokens shared. Pick the stablecoin as the quote.
         const tokens = [poolX.t0, poolX.t1];
         const stableTok = tokens.find((t) => stables.has(t));
-        const quote = stableTok ?? tokens[1]; // if neither known-stable, fall back; caller warns
+        // If neither token is a known stable, fall back to tokens[1] as the quote and
+        // the caller is warned the USD figures are approximate. base is then derived as
+        // "the token that is NOT the quote", so base and quote are ALWAYS distinct (a V3
+        // pool's token0 !== token1); the fallback can never pick the base as the quote.
+        const quote = stableTok ?? tokens[1];
         const base = tokens.find((t) => t !== quote);
         const decBase = decimalsFn ? await decimalsFn(base) : 18;
         const decQuote = decimalsFn ? await decimalsFn(quote) : 18;
@@ -208,31 +212,37 @@ async function cycleOut(startUsd, plan, poolX, poolY, { quoteFn, stableLegBps = 
     const feeX = poolX.fee, feeY = poolY.fee;
     const quoterX = poolX.quoter ?? QUOTER, quoterY = poolY.quoter ?? QUOTER;
 
+    // Each leg's quote token MUST match the pool whose fee/quoter it is swapped
+    // through: QA lives in pool X (feeX/quoterX), QB lives in pool Y (feeY/quoterY).
+    // In SAME-PAIR mode QA==QB so this is identical both ways; in ONE-SHARED mode
+    // QA!==QB and mispairing a quote with the wrong pool would target a non-existent
+    // (quote, base, fee) pool and the quote would revert to null.
+    //
     // amounts in each quote's own decimals (quote assumed ~$1 stable)
-    const inX = BigInt(Math.round(startUsd * 10 ** decQB)); // start with QB (pool-X quote spent on X)
-    const inY = BigInt(Math.round(startUsd * 10 ** decQA)); // start with QA (pool-Y quote spent on Y)
+    const inX = BigInt(Math.round(startUsd * 10 ** decQA)); // dir X->Y starts with QA (pool-X quote spent on X)
+    const inY = BigInt(Math.round(startUsd * 10 ** decQB)); // dir Y->X starts with QB (pool-Y quote spent on Y)
 
-    // leg 1 of each direction: buy BASE
-    const baseFromX = await quoteFn(QB, base, inX, feeX, quoterX); // dir X->Y: buy BASE on X with QB
-    const baseFromY = await quoteFn(QA, base, inY, feeY, quoterY); // dir Y->X: buy BASE on Y with QA
+    // leg 1 of each direction: buy BASE on the pool whose quote we spend
+    const baseFromX = await quoteFn(QA, base, inX, feeX, quoterX); // dir X->Y: buy BASE on X with QA
+    const baseFromY = await quoteFn(QB, base, inY, feeY, quoterY); // dir Y->X: buy BASE on Y with QB
 
-    // leg 2 of each direction: sell BASE back into the quote on the OTHER pool
-    const outX = baseFromX != null ? await quoteFn(base, QA, baseFromX, feeY, quoterY) : null; // sell on Y -> QA
-    const outY = baseFromY != null ? await quoteFn(base, QB, baseFromY, feeX, quoterX) : null; // sell on X -> QB
+    // leg 2 of each direction: sell BASE back into the OTHER pool's quote on that pool
+    const outX = baseFromX != null ? await quoteFn(base, QB, baseFromX, feeY, quoterY) : null; // sell on Y -> QB
+    const outY = baseFromY != null ? await quoteFn(base, QA, baseFromY, feeX, quoterX) : null; // sell on X -> QA
 
     // cross-stable 3rd-leg haircut: only in ONE-SHARED-TOKEN mode where QA !== QB.
     // In SAME-PAIR mode plan.crossStable is false -> haircut is 0.
     const haircut = (usd) => (plan.crossStable ? (usd * stableLegBps) / 10000 : 0);
 
     let best = null;
-    // dir X->Y: started with startUsd of QB, ended with QA out
+    // dir X->Y: started with startUsd of QA (on X), ended with QB out (on Y)
     if (baseFromX != null && outX != null) {
-        const outUsd = Number(outX) / 10 ** decQA; // QA ~ $1
+        const outUsd = Number(outX) / 10 ** decQB; // QB ~ $1
         best = { dir: "A->B", net: outUsd - startUsd - haircut(outUsd) };
     }
-    // dir Y->X: started with startUsd of QA, ended with QB out
+    // dir Y->X: started with startUsd of QB (on Y), ended with QA out (on X)
     if (baseFromY != null && outY != null) {
-        const outUsd = Number(outY) / 10 ** decQB; // QB ~ $1
+        const outUsd = Number(outY) / 10 ** decQA; // QA ~ $1
         const net2 = outUsd - startUsd - haircut(outUsd);
         if (!best || net2 > best.net) best = { dir: "B->A", net: net2 };
     }

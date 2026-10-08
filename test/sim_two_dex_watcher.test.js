@@ -105,8 +105,10 @@ test('SAME-PAIR: profitable cross-DEX cycle yields positive net + correct direct
 //     cross-stable 3rd-leg haircut is still charged.
 // ---------------------------------------------------------------------------
 test('ONE-SHARED-TOKEN: legacy B3 shape detected and still charges cross-stable haircut', async () => {
-  const poolA = pool(FAKE.B3, FAKE.B3, FAKE.USDT, 10000); // B3/USDT
-  const poolB = pool(FAKE.USDC, FAKE.USDC, FAKE.B3, 10000); // B3/USDC (flipped order)
+  const FEE_A = 10000; // pool A: B3/USDT
+  const FEE_B = 3000;  // pool B: B3/USDC (DIFFERENT fee tier)
+  const poolA = pool(FAKE.B3, FAKE.B3, FAKE.USDT, FEE_A); // B3/USDT
+  const poolB = pool(FAKE.USDC, FAKE.USDC, FAKE.B3, FEE_B); // B3/USDC (flipped order)
 
   const plan = await detectShape(poolA, poolB, { decimalsFn });
   assert.equal(plan.mode, 'ONE_SHARED');
@@ -118,31 +120,49 @@ test('ONE-SHARED-TOKEN: legacy B3 shape detected and still charges cross-stable 
 
   // A FLAT market (buy then sell returns exactly startUsd gross) so the ONLY thing
   // reducing net is the cross-stable haircut. With bps=50 the net must be < 0.
+  //
+  // CRITICAL: this mock routes by (tokenIn, fee) and gives USDC and USDT DIFFERENT
+  // identities. Pool A ONLY trades B3<->USDT at FEE_A; pool B ONLY trades B3<->USDC
+  // at FEE_B. A (stable, fee) combination that does not correspond to a real pool
+  // returns null, exactly as QuoterV2 would revert on a non-existent pool. This is
+  // what makes a leg MISPAIRING observable: if cycleOut spends QB (USDC) through
+  // pool X's FEE_A, or QA (USDT) through pool Y's FEE_B, the quote resolves to null
+  // and the cycle produces no result, failing the assertions below.
   const DEC = { [FAKE.B3]: 18, [FAKE.USDC]: 6, [FAKE.USDT]: 6 };
   function amt(token, human) { return BigInt(Math.round(human * 10 ** DEC[token.toLowerCase()])); }
-  const quoteFn = async (tokenIn, tokenOut, amountIn) => {
+  // valid (stable, fee) routes: USDT only on pool A (FEE_A), USDC only on pool B (FEE_B)
+  const routeOk = (stable, fee) =>
+    (stable === FAKE.USDT && fee === FEE_A) || (stable === FAKE.USDC && fee === FEE_B);
+  const quoteFn = async (tokenIn, tokenOut, amountIn, fee) => {
     const inHuman = Number(amountIn) / 10 ** DEC[tokenIn.toLowerCase()];
-    if (tokenOut === FAKE.B3) return amt(FAKE.B3, inHuman / 10); // 1 stable -> 0.1 B3 (B3 ~ $10)
-    if (tokenIn === FAKE.B3) return amt(tokenOut, inHuman * 10); // 0.1 B3 -> 1 stable back (flat)
-    throw new Error('unexpected quote');
+    if (tokenOut === FAKE.B3) {
+      // buy B3 with a stable: only valid on that stable's own pool/fee
+      if (!routeOk(tokenIn, fee)) return null; // non-existent pool -> QuoterV2 reverts
+      return amt(FAKE.B3, inHuman / 10); // 1 stable -> 0.1 B3 (B3 ~ $10), flat
+    }
+    if (tokenIn === FAKE.B3) {
+      // sell B3 into a stable: only valid on that stable's own pool/fee
+      if (!routeOk(tokenOut, fee)) return null;
+      return amt(tokenOut, inHuman * 10); // 0.1 B3 -> 1 stable back (flat)
+    }
+    throw new Error('unexpected quote ' + tokenIn + '->' + tokenOut);
   };
 
   const startUsd = 1000;
   const withHaircut = await cycleOut(startUsd, plan, poolA, poolB, { quoteFn, stableLegBps: 50 });
-  assert.ok(withHaircut, 'cycle returns a result');
+  assert.ok(withHaircut, 'cycle returns a result (legs are correctly paired with their pools)');
   // Gross is flat (~0), so the 50 bps haircut on ~$1000 (~ -$5) makes net clearly negative.
   assert.ok(withHaircut.net < 0, `cross-stable haircut should push net negative, got ${withHaircut.net}`);
   assert.ok(withHaircut.net < -4 && withHaircut.net > -6, `~50bps of $1000 ~ -$5, got ${withHaircut.net}`);
 
   // Sanity: the SAME flat market in a SAME-PAIR plan (no haircut) nets ~0, proving the
-  // haircut is the only difference between the two modes.
+  // haircut is the only difference between the two modes. SAME-PAIR shares one stable
+  // (USDC) and one fee tier, so route both legs through pool B's (USDC, FEE_B).
   const samePairPlan = { ...plan, mode: 'SAME_PAIR', crossStable: false, QA: FAKE.USDC, QB: FAKE.USDC, decQA: 6, decQB: 6 };
-  const flat = await cycleOut(startUsd, samePairPlan, poolA, poolB,
-    { quoteFn: async (ti, to, ai) => {
-        const inHuman = Number(ai) / 10 ** DEC[ti.toLowerCase()];
-        if (to === FAKE.B3) return amt(FAKE.B3, inHuman / 10);
-        return amt(FAKE.USDC, inHuman * 10);
-      }, stableLegBps: 50 });
+  const samePoolA = pool(FAKE.USDC, FAKE.USDC, FAKE.B3, FEE_B);
+  const flat = await cycleOut(startUsd, samePairPlan, samePoolA, poolB,
+    { quoteFn, stableLegBps: 50 });
+  assert.ok(flat, 'same-pair cycle returns a result');
   assert.ok(Math.abs(flat.net) < 0.01, `SAME-PAIR mode charges no haircut (net ~0), got ${flat.net}`);
 });
 

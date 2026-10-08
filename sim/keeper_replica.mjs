@@ -4,7 +4,7 @@
  * run against LIVE Ethereum mainnet data.
  *
  * It re-implements the keeper's decision pipeline function-for-function and
- * applies it to every new block, but STOPS before anything that needs a wallet.
+ * applies it to every new block, but STOPS before anything that needs key custody.
  *
  *   Original keeper                        This replica
  *   ------------------------------------   -----------------------------------------------
@@ -46,7 +46,7 @@
  *                 are added, V3 quotes use the correct QuoterV2 call and V3 swaps
  *                 assume a router the contract is compatible with.
  *
- * SAFETY: only read methods are allowed (enforced). No wallet, no key, no transactions.
+ * SAFETY: only read methods are allowed (enforced). No key custody, no transactions.
  *
  * Usage: node sim/keeper_replica.mjs [--mode exact|fixed] [--v3] [--minutes 360]
  *        [--flash 20000] [--max-hops 4]      RPC_URL=<your node> to use your own RPC.

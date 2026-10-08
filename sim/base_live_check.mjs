@@ -26,7 +26,7 @@
  * routes. This measures whether such opportunities EXIST.
  *
  * SAFETY: read-only (eth_call / eth_blockNumber / eth_gasPrice / eth_chainId /
- * eth_getCode). No wallet, no key, no transactions.
+ * eth_getCode). No key custody, no transactions.
  *
  * Usage: node sim/base_live_check.mjs [--minutes 60] [--every 20] [--sizes 1000]
  *        [--triangles 150] [--no-triangles] [--tokens 0xAddr,0xAddr]

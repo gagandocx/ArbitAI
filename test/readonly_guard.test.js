@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = join(__dirname, '..', 'src');
 const BIN_DIR = join(__dirname, '..', 'bin');
+const SIM_DIR = join(__dirname, '..', 'sim');
 
 // Transaction-sending / signing / key-holding primitives that must NEVER
 // appear anywhere in the read-only codebase. Matched case-insensitively.
@@ -31,15 +32,15 @@ function walk(dir) {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) {
       out.push(...walk(full));
-    } else if (full.endsWith('.js')) {
+    } else if (full.endsWith('.js') || full.endsWith('.mjs')) {
       out.push(full);
     }
   }
   return out;
 }
 
-test('the src/bin tree contains no transaction-sending or signing primitives', () => {
-  const files = [...walk(SRC_DIR), ...walk(BIN_DIR)];
+test('the src/bin/sim tree contains no transaction-sending or signing primitives', () => {
+  const files = [...walk(SRC_DIR), ...walk(BIN_DIR), ...walk(SIM_DIR)];
   assert.ok(files.length > 0, 'expected source files to scan');
 
   const offenders = [];

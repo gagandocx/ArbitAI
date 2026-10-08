@@ -13,7 +13,7 @@
  * earliest the bot (which reacts to new blocks) could actually land a trade.
  *
  * SAFETY: read-only. Only eth_call / eth_blockNumber / eth_gasPrice /
- * eth_chainId are allowed (enforced below). No wallet, no private key, no
+ * eth_chainId are allowed (enforced below). No key custody, no private key, no
  * transactions, no money at risk.
  *
  * Requirements: Node.js 18+ (no npm install needed).
