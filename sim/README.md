@@ -3,6 +3,26 @@
 All scripts are **read-only**: no wallet, no private key, no transactions, no money at risk.
 Requirements: **Node.js 18+**. No `npm install` needed.
 
+## 0. Live two-DEX watcher (watch-only, the proven hotspot pair)
+
+`live_two_dex_watcher.mjs` watches the single most-arbitraged pair the recon found on Base — USDC/WETH on
+the two hotspot pools (`0xf411…`, `0x2df3…`) — every new block. From real on-chain QuoterV2 quotes it computes
+a flash-loan cycle (borrow USDC → buy WETH on the cheaper pool → sell on the dearer → USDC) at several sizes,
+subtracts the live gas, and logs a **WOULD-FIRE** signal whenever a cycle would net more than a threshold.
+
+It fires nothing — no wallet, no keys, no transactions. It answers the make-or-break question before any money
+is risked: *how often does a real, above-cost two-DEX gap actually open on this pair?*
+
+```sh
+set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+node sim/live_two_dex_watcher.mjs --minutes 60
+```
+
+Options: `--min-profit-usd 0.10` (signal threshold, after gas), `--sizes 1000,5000,20000,100000`,
+`--poolA 0x..` / `--poolB 0x..` / `--quoter 0x..` to watch a different pair. Watch for a few hours
+(ideally across a volatile moment). The summary's **WOULD-FIRE signals** count is the opportunity rate;
+only if it is regularly non-zero is live execution worth considering.
+
 ## 0a. Multi-chain arbitrage recon + sweep (where is the edge?)
 
 `arb_recon.mjs` is chain-agnostic — pass `--chain base|arbitrum|optimism|polygon|bsc|ethereum`.
