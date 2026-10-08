@@ -155,16 +155,25 @@ async function cycleOut(startUsd, tag) {
     calls.push(baseFromA != null ? quoteCall(BASE_TOK, QB, baseFromA, feeB, tag) : ["eth_chainId", []]); // sell on B -> QB
     const [o1, o2] = await batch(calls);
 
+    // If the two pools quote in DIFFERENT stablecoins (e.g. B3/USDC vs B3/USDT),
+    // the cycle ends in the wrong stable and needs a 3rd swap (USDT<->USDC) to truly
+    // return to the start token. Charge a conservative cost for that leg so we don't
+    // over-count. Default 5 bps (~a stable-pool fee); override with --stable-leg-bps.
+    const crossStable = QA !== QB;
+    const stableLegBps = Number(opt("stable-leg-bps", "5"));
+    const haircut = (usd) => (crossStable ? (usd * stableLegBps) / 10000 : 0);
+
     let best = null;
-    // dir1: started with startUsd of QB, ended with QA out -> net USD = QA_out_usd - startUsd
+    // dir1: started with startUsd of QB, ended with QA out -> net USD = QA_out_usd - startUsd - 3rd-leg
     if (baseFromB != null) {
         const outUsd = o1 && o1 !== "0x" ? Number(firstUint(o1)) / 10 ** decQA : null; // QA ~ $1
-        if (outUsd != null) best = { dir: "B->A", net: outUsd - startUsd };
+        if (outUsd != null) best = { dir: "B->A", net: outUsd - startUsd - haircut(outUsd) };
     }
     // dir2: started with startUsd of QA, ended with QB out
     if (baseFromA != null) {
         const outUsd = o2 && o2 !== "0x" ? Number(firstUint(o2)) / 10 ** decQB : null;
-        if (outUsd != null && (!best || (outUsd - startUsd) > best.net)) best = { dir: "A->B", net: outUsd - startUsd };
+        const net2 = outUsd != null ? outUsd - startUsd - haircut(outUsd) : null;
+        if (net2 != null && (!best || net2 > best.net)) best = { dir: "A->B", net: net2 };
     }
     // price BASE in USD (from pool A quote) for gas conversion / display
     if (baseFromA != null && baseFromA > 0n) baseUsd = startUsd / (Number(baseFromA) / 10 ** 18); // assumes BASE 18 dec
