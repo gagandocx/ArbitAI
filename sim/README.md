@@ -3,6 +3,26 @@
 All scripts are **read-only**: no wallet, no private key, no transactions, no money at risk.
 Requirements: **Node.js 18+**. No `npm install` needed.
 
+## 0a. Multi-chain arbitrage recon + sweep (where is the edge?)
+
+`arb_recon.mjs` is chain-agnostic — pass `--chain base|arbitrum|optimism|polygon|bsc|ethereum`.
+It detects cyclic arbitrage, removes measurement artifacts (relays / >$100k / profit>25%-of-volume),
+and reports TRUSTWORTHY profit per chain. `chain_sweep.mjs` runs several chains and prints one
+comparison table so you can see which chain actually has capturable arbitrage profit.
+
+```sh
+# compare chains (public RPCs are rate-limited; give each a private RPC for a real run)
+set BASE_RPC=...  ARBITRUM_RPC=...  POLYGON_RPC=...   (etc.)
+node sim/chain_sweep.mjs --chains base,arbitrum,optimism,polygon,bsc --blocks 300
+
+# go deep on the winner
+set RPC_URL=<winner chain rpc>
+node sim/arb_recon.mjs --chain <winner> --blocks 2000
+```
+
+Judge each chain by: arbs/block, trusted$ total, and the >$5 / >$20 counts. A chain only
+"has an edge" if there is real, repeatable profit in 2-3 pool routes after artifacts are removed.
+
 ## 0. Arbitrage recon on Base (learn from the bots that win)
 
 `arb_recon.mjs` is read-only. It scans recent Base blocks, groups every DEX swap by transaction, and detects

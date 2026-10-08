@@ -34,30 +34,96 @@ import fs from "node:fs";
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf("--" + n); return i >= 0 ? args[i + 1] : d; };
+const lower = (a) => a.toLowerCase();
+
+// ---- multi-chain config: public fallback RPCs + known tokens for USD pricing ----
+// The detection logic is chain-agnostic (any EVM Swap/Transfer events). Only the
+// RPC endpoints and the stablecoin set (for USD valuation) differ per chain.
+const CHAINS = {
+    base: {
+        chainId: "0x2105",
+        rpcs: ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.llamarpc.com", "https://1rpc.io/base"],
+        tokens: {
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": { s: "USDC", d: 6, usd: 1 },
+            "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": { s: "USDbC", d: 6, usd: 1 },
+            "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2": { s: "USDT", d: 6, usd: 1 },
+            "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": { s: "DAI", d: 18, usd: 1 },
+            "0x4200000000000000000000000000000000000006": { s: "WETH", d: 18, usd: null },
+            "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": { s: "cbBTC", d: 8, usd: null },
+            "0x940181a94a35a4569e4529a3cdfb74e38fd98631": { s: "AERO", d: 18, usd: null },
+        },
+    },
+    arbitrum: {
+        chainId: "0xa4b1",
+        rpcs: ["https://arb1.arbitrum.io/rpc", "https://arbitrum-one-rpc.publicnode.com", "https://1rpc.io/arb"],
+        tokens: {
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831": { s: "USDC", d: 6, usd: 1 },
+            "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": { s: "USDC.e", d: 6, usd: 1 },
+            "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": { s: "USDT", d: 6, usd: 1 },
+            "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": { s: "DAI", d: 18, usd: 1 },
+            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": { s: "WETH", d: 18, usd: null },
+            "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": { s: "WBTC", d: 8, usd: null },
+            "0x912ce59144191c1204e64559fe8253a0e49e6548": { s: "ARB", d: 18, usd: null },
+        },
+    },
+    optimism: {
+        chainId: "0xa",
+        rpcs: ["https://mainnet.optimism.io", "https://optimism-rpc.publicnode.com", "https://1rpc.io/op"],
+        tokens: {
+            "0x0b2c639c533813f4aa9d7837caf62653d097ff85": { s: "USDC", d: 6, usd: 1 },
+            "0x7f5c764cbc14f9669b88837ca1490cca17c31607": { s: "USDC.e", d: 6, usd: 1 },
+            "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58": { s: "USDT", d: 6, usd: 1 },
+            "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": { s: "DAI", d: 18, usd: 1 },
+            "0x4200000000000000000000000000000000000006": { s: "WETH", d: 18, usd: null },
+            "0x4200000000000000000000000000000000000042": { s: "OP", d: 18, usd: null },
+        },
+    },
+    polygon: {
+        chainId: "0x89",
+        rpcs: ["https://polygon-rpc.com", "https://polygon-bor-rpc.publicnode.com", "https://1rpc.io/matic"],
+        tokens: {
+            "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": { s: "USDC", d: 6, usd: 1 },
+            "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": { s: "USDC.e", d: 6, usd: 1 },
+            "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": { s: "USDT", d: 6, usd: 1 },
+            "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063": { s: "DAI", d: 18, usd: 1 },
+            "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619": { s: "WETH", d: 18, usd: null },
+            "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270": { s: "WMATIC", d: 18, usd: null },
+        },
+    },
+    bsc: {
+        chainId: "0x38",
+        rpcs: ["https://bsc-dataseed.bnbchain.org", "https://bsc-rpc.publicnode.com", "https://1rpc.io/bnb"],
+        tokens: {
+            "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": { s: "USDC", d: 18, usd: 1 },
+            "0x55d398326f99059ff775485246999027b3197955": { s: "USDT", d: 18, usd: 1 },
+            "0xe9e7cea3dedca5984780bafc599bd69add087d56": { s: "BUSD", d: 18, usd: 1 },
+            "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c": { s: "WBNB", d: 18, usd: null },
+            "0x2170ed0880ac9a755fd29b2688956bd959f933f8": { s: "ETH", d: 18, usd: null },
+        },
+    },
+    ethereum: {
+        chainId: "0x1",
+        rpcs: ["https://ethereum-rpc.publicnode.com", "https://eth.llamarpc.com", "https://1rpc.io/eth"],
+        tokens: {
+            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": { s: "USDC", d: 6, usd: 1 },
+            "0xdac17f958d2ee523a2206206994597c13d831ec7": { s: "USDT", d: 6, usd: 1 },
+            "0x6b175474e89094c44da98b954eedeac495271d0f": { s: "DAI", d: 18, usd: 1 },
+            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": { s: "WETH", d: 18, usd: null },
+            "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": { s: "WBTC", d: 8, usd: null },
+        },
+    },
+};
+
+const CHAIN = opt("chain", "base");
+if (!CHAINS[CHAIN]) { console.error(`Unknown --chain "${CHAIN}". Options: ${Object.keys(CHAINS).join(", ")}`); process.exit(1); }
+const CFG = CHAINS[CHAIN];
 const N_BLOCKS = Number(opt("blocks", 300));
 const FROM = opt("from", null) ? Number(opt("from")) : null;
 const MIN_HOPS = Number(opt("min-hops", 2));
 const TOP = Number(opt("top", 40));
-const LOG_FILE = opt("log", "arb_recon_log.csv");
-const RPCS = process.env.RPC_URL ? [process.env.RPC_URL]
-    : ["https://mainnet.base.org", "https://base-rpc.publicnode.com", "https://base.llamarpc.com", "https://1rpc.io/base"];
-
-// ---- known tokens (for readable labels + rough USD) ----
-const lower = (a) => a.toLowerCase();
-const KNOWN = {
-    "0x4200000000000000000000000000000000000006": { s: "WETH", d: 18, usd: null },
-    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": { s: "USDC", d: 6, usd: 1 },
-    "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": { s: "USDbC", d: 6, usd: 1 },
-    "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2": { s: "USDT", d: 6, usd: 1 },
-    "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": { s: "DAI", d: 18, usd: 1 },
-    "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42": { s: "EURC", d: 6, usd: 1.08 },
-    "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22": { s: "cbETH", d: 18, usd: null },
-    "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452": { s: "wstETH", d: 18, usd: null },
-    "0x04c0599ae5a44757c0af6f9ec3b93da8976c150a": { s: "weETH", d: 18, usd: null },
-    "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": { s: "cbBTC", d: 8, usd: null },
-    "0x940181a94a35a4569e4529a3cdfb74e38fd98631": { s: "AERO", d: 18, usd: null },
-    "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b": { s: "VIRTUAL", d: 18, usd: null },
-};
+const LOG_FILE = opt("log", `arb_recon_${CHAIN}.csv`);
+const RPCS = process.env.RPC_URL ? [process.env.RPC_URL] : CFG.rpcs;
+const KNOWN = CFG.tokens;
 const sym = (a) => KNOWN[lower(a)]?.s || (lower(a).slice(0, 6) + "…" + lower(a).slice(-4));
 
 // ---- event topics ----
@@ -267,7 +333,7 @@ async function scanBlock(bn) {
 function fmtEth(x) { return x.toFixed(6) + " ETH"; }
 function report() {
     console.log("\n" + "=".repeat(96));
-    console.log(`ARB RECON SUMMARY — ${STATS.blocksScanned} Base blocks scanned, min hops ${MIN_HOPS}`);
+    console.log(`ARB RECON SUMMARY [${CHAIN}] — ${STATS.blocksScanned} blocks scanned, min hops ${MIN_HOPS}`);
     console.log(`  Transactions containing DEX swaps: ${STATS.txWithSwaps} | total swaps: ${STATS.totalSwaps}`);
     console.log(`  CYCLIC ARBITRAGE transactions detected: ${STATS.arbTxs}`);
     if (!STATS.arbTxs) { console.log("  (none detected — try more --blocks, or lower --min-hops to 2)"); console.log("=".repeat(96)); return; }
@@ -319,13 +385,13 @@ function report() {
 
 async function main() {
     const chainId = await rpc("eth_chainId", []);
-    if (chainId !== "0x2105") throw new Error(`Expected Base (0x2105), got ${chainId}`);
+    if (chainId !== CFG.chainId) throw new Error(`Expected ${CHAIN} (${CFG.chainId}), got ${chainId}. Is RPC_URL pointed at ${CHAIN}?`);
     const latest = Number(BigInt(await rpc("eth_blockNumber", [])));
     const from = FROM ?? (latest - N_BLOCKS + 1);
     const to = FROM ? FROM + N_BLOCKS - 1 : latest;
     if (!process.env.RPC_URL) console.log("WARNING: no RPC_URL set — public endpoints will likely rate-limit full-block reads. Set your Alchemy URL first.\n");
     if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "block,tx_index,tx_count,pools,cycle,profit_token,profit_usd,flagged,gas_eth,priority_gwei,tx_hash\n");
-    console.log(`Scanning Base blocks ${from}..${to} (${to - from + 1} blocks) for cyclic arbitrage...\n`);
+    console.log(`Scanning ${CHAIN} blocks ${from}..${to} (${to - from + 1} blocks) for cyclic arbitrage...\n`);
 
     let done = 0;
     for (let bn = from; bn <= to; bn++) {
