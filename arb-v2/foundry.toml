@@ -5,6 +5,8 @@ libs = ["lib"]
 solc = "0.8.24"
 optimizer = true
 optimizer_runs = 1000000
+# the fork test reads many JSON fields into locals; via_ir avoids "stack too deep"
+via_ir = true
 # fork tests read historical Base state; set BASE_RPC in your env
 [rpc_endpoints]
 base = "${BASE_RPC}"
