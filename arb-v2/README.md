@@ -14,6 +14,8 @@ arb-v2/
   src/ArbExecutorV2.sol        the executor: Morpho free flash loan -> direct V3 pool swaps -> profit-or-revert
   src/interfaces.sol           minimal interfaces (Morpho, UniV3-style pool, ERC20)
   test/Backtest.t.sol          fork test: deploy on a Base fork, replay a 2-pool cycle, assert profit
+  test/B3Cycle.t.sol           fork test: execute a real B3 cross-DEX cycle (with a 3rd stable leg)
+  test/WethUsdcCycle.t.sol     fork test: execute a real WETH/USDC same-pair cross-DEX cycle (no 3rd leg)
   test/replay/cases.json       arbitrage cases to replay (generated from arb_recon_clean.csv)
   script/MakeCases.mjs         turns arb_recon_clean.csv -> cases.json (pulls each tx's pools+block)
   foundry.toml
@@ -49,6 +51,33 @@ forge test --fork-url $BASE_RPC -vv
 
 The test prints, per case: the real arb's profit vs **what our contract reproduced on the fork**,
 and a final capture summary. Send me that output.
+
+## WethUsdcCycle fork test (confirm a WETH/USDC cross-DEX signal with real swaps)
+
+`test/WethUsdcCycle.t.sol` confirms a WETH/USDC signal from the live watcher by executing the
+**complete same-pair cross-DEX cycle** on a Base fork: start USDC, buy WETH on pool A (one DEX),
+sell that WETH on pool B (another DEX) for USDC, then compare USDC-out vs USDC-in at sizes
+`[1000, 5000, 20000, 50000]`. Both pools are WETH/USDC, so there is **no 3rd stable leg**; the
+end-USDC is compared directly to the start-USDC. It drives the pools directly as a trader via inline
+swap callbacks (no routers), the same pattern as `B3Cycle.t.sol`.
+
+The pool addresses are **user-supplied**, read from env, and must come from DEX Screener
+(dexscreener.com/base, search "WETH USDC"): the Uniswap V3, PancakeSwap V3 and SushiSwap V3
+WETH/USDC pool addresses. WETH and USDC default to the canonical Base token addresses. Set the three
+pool addresses, then run at the block where the watcher fired:
+
+```sh
+cd arb-v2
+forge install foundry-rs/forge-std --no-commit
+export BASE_RPC=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+export POOL_A=0xUNISWAP_V3_WETH_USDC POOL_B=0xPANCAKE_V3_WETH_USDC
+export POOL_C=0xSUSHI_V3_WETH_USDC   # optional, enables the 3-DEX test
+forge test --match-contract WethUsdcCycle --fork-url $BASE_RPC --fork-block-number <block> -vv
+```
+
+To cover all three pairings without `POOL_C`, run the A<->B test three times, swapping env each run:
+`(POOL_A=Uni, POOL_B=Pancake)`, `(POOL_A=Uni, POOL_B=Sushi)`, `(POOL_A=Pancake, POOL_B=Sushi)`. If
+`POOL_C` is set, `testWethUsdcCycleThreeDex` runs all three pairings in one invocation.
 
 ## What the result decides
 

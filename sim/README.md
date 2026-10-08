@@ -3,26 +3,48 @@
 All scripts are **read-only**: no wallet, no private key, no transactions, no money at risk.
 Requirements: **Node.js 18+**. No `npm install` needed.
 
-## 0. Live two-DEX watcher (watch-only, the proven hotspot pair)
+## 0. Live two-DEX watcher (watch-only, deep WETH/USDC across three DEXes)
 
-`live_two_dex_watcher.mjs` watches the single most-arbitraged token the recon found on Base — **B3**
-(`0x07b3…1291d0`), traded against USDC and USDT on the two hotspot pools (`0xf411…` = B3/USDT, `0x2df3…` = B3/USDC) —
-every new block. It auto-detects each pool's tokens, so `--poolA/--poolB` can point it at any token/two-pool setup. From real on-chain QuoterV2 quotes it computes
-a flash-loan cycle (borrow USDC → buy WETH on the cheaper pool → sell on the dearer → USDC) at several sizes,
-subtracts the live gas, and logs a **WOULD-FIRE** signal whenever a cycle would net more than a threshold.
+`live_two_dex_watcher.mjs` watches one pair across its pools every new block. It auto-detects each
+pool's tokens and works in two modes:
 
-It fires nothing — no wallet, no keys, no transactions. It answers the make-or-break question before any money
-is risked: *how often does a real, above-cost two-DEX gap actually open on this pair?*
+- **SAME-PAIR mode** (the deep use case): both pools share BOTH tokens, e.g. **WETH/USDC** on
+  Uniswap V3 vs PancakeSwap V3 vs SushiSwap V3. The cycle is a clean 2-leg same-pair cross-DEX loop
+  (start USDC, buy WETH on the cheaper pool, sell on the dearer pool for USDC) with NO cross-stable
+  3rd leg. The quote token (USDC) is the ~$1 stable; the base token (WETH, 18-dec) is read from chain.
+- **ONE-SHARED-TOKEN mode** (the legacy B3 case): the two pools share exactly one token and the other
+  two are treated as ~$1 stable quotes, with an optional 3rd stable-leg haircut.
+
+From real on-chain QuoterV2 quotes it computes the flash-loan cycle at several sizes, subtracts the
+live gas, and logs a **WOULD-FIRE** signal whenever a cycle would net more than a threshold.
+
+**Three-DEX coverage:** pass `--poolC` in addition to `--poolA`/`--poolB`. When all three pools share
+the same pair, the watcher evaluates all three DEX pairings per block (A<->B, A<->C, B<->C) and reports
+the best. Omit `--poolC` and it behaves as before (A<->B only).
+
+You must fetch the three pool addresses yourself from **DEX Screener** (dexscreener.com/base, search
+"WETH USDC"): the Uniswap V3, PancakeSwap V3 and SushiSwap V3 WETH/USDC pool addresses. These are not
+hardcoded; supply them via `--poolA/--poolB/--poolC`.
+
+It fires nothing: no wallet, no keys, no transactions. It answers the make-or-break question before any money
+is risked: *how often does a real, above-cost cross-DEX gap actually open on this pair?*
 
 ```sh
+# WETH/USDC across the three DEXes (addresses from DEX Screener, dexscreener.com/base):
 set RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
-node sim/live_two_dex_watcher.mjs --minutes 60
+node sim/live_two_dex_watcher.mjs \
+  --poolA 0xUNISWAP_V3_WETH_USDC \
+  --poolB 0xPANCAKE_V3_WETH_USDC \
+  --poolC 0xSUSHI_V3_WETH_USDC \
+  --minutes 60
 ```
 
 Options: `--min-profit-usd 0.10` (signal threshold, after gas), `--sizes 1000,5000,20000,100000`,
-`--poolA 0x..` / `--poolB 0x..` / `--quoter 0x..` to watch a different pair. Watch for a few hours
-(ideally across a volatile moment). The summary's **WOULD-FIRE signals** count is the opportunity rate;
-only if it is regularly non-zero is live execution worth considering.
+`--poolA 0x..` / `--poolB 0x..` / `--poolC 0x..` / `--quoter 0x..` to watch a different pair or add a
+third DEX. Watch for a few hours (ideally across a volatile moment). The summary's **WOULD-FIRE signals**
+count is the opportunity rate; only if it is regularly non-zero is live execution worth considering. Then
+confirm any signal with the `arb-v2/test/WethUsdcCycle.t.sol` fork test (real swaps, all sizes) at the
+block where the watcher fired, before trusting it.
 
 ## 0a. Multi-chain arbitrage recon + sweep (where is the edge?)
 

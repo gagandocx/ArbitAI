@@ -73,15 +73,22 @@ with a flash loan. Cross-chain needs real capital on both sides (real risk, no f
 
 ## 6. Where we are & the NEXT STEP
 
-Last actions: added the pre-approval gas optimization to `ArbExecutorV2`. User wants to (a) test the
-three big DEXes explicitly, (b) find a better edge with more advanced data.
+Last actions: reworked `live_two_dex_watcher.mjs` so it now handles the DEEP same-pair cross-DEX case
+across the three big DEXes. It has a SAME-PAIR mode (both pools share BOTH tokens, e.g. WETH/USDC:
+quote USDC is the stable, base WETH is 18-dec and read from chain, and there is NO cross-stable 3rd-leg
+haircut) alongside the legacy ONE-SHARED-TOKEN (B3) mode, plus a `--poolC` option that evaluates all
+three DEX pairings per block (A<->B, A<->C, B<->C). Added a new fork test `arb-v2/test/WethUsdcCycle.t.sol`
+that confirms a WETH/USDC signal with REAL swaps at all sizes, mirroring the `B3Cycle.t.sol` pattern but
+for the 2-leg same-pair cycle (USDC -> WETH on DEX A -> USDC on DEX B) with no 3rd stable leg. Its pool
+addresses are user-supplied via env (`POOL_A`, `POOL_B`, optional `POOL_C`), never fabricated.
 
-**Immediate next step requested:** point `live_two_dex_watcher.mjs` at a DEEP major pair across the
-three DEXes the video pushes — e.g. WETH/USDC on Uniswap V3 vs PancakeSwap V3, and vs SushiSwap V3 —
-instead of the shallow B3 pools. Need the three pool addresses from DEX Screener (dexscreener.com/base,
-search "WETH USDC"): the Uniswap V3, PancakeSwap V3, and SushiSwap V3 pool addresses. Then run:
-`node sim/live_two_dex_watcher.mjs --poolA <uni> --poolB <pancake> --minutes 60`
-and confirm any signal with a B3Cycle-style fork test (real swaps, all sizes) before trusting it.
+**Immediate next step requested:** fetch the three WETH/USDC pool addresses from DEX Screener
+(dexscreener.com/base, search "WETH USDC"): the Uniswap V3, PancakeSwap V3, and SushiSwap V3 pool
+addresses. Then run the watcher across all three pairings:
+`node sim/live_two_dex_watcher.mjs --poolA <uni> --poolB <pancake> --poolC <sushi> --minutes 60`
+and confirm any WOULD-FIRE signal with the new `WethUsdcCycle` fork test (real swaps, all sizes) at the
+firing block:
+`cd arb-v2 && forge install foundry-rs/forge-std --no-commit && export BASE_RPC=... POOL_A=0x... POOL_B=0x... POOL_C=0x... && forge test --match-contract WethUsdcCycle --fork-url $BASE_RPC --fork-block-number <block> -vv`.
 
 **Other honest options:** (1) backrun-opportunity analyzer (does a large swap trigger each arb, and how
 big is the post-swap gap — probes intra-block timing, the real edge); (2) scan a newer/less-saturated
