@@ -113,7 +113,36 @@ overridable with `--quoter` if you want to verify it against the live chain firs
 big is the post-swap gap — probes intra-block timing, the real edge); (2) scan a newer/less-saturated
 chain (e.g. Unichain) with the same fork-proof method.
 
+**NEW WAY OF WORKING - the continuous measurement harness (`harness/`).** Instead of running
+each step by hand, there is now a self-running harness that automates the whole loop and
+accumulates results over days. See `harness/README.md` for full usage. In short, each cycle it:
+(1) preflights the configured pools (`--check`), (2) runs `live_two_dex_watcher.mjs` for a while
+writing a per-run CSV, (3) picks the top-N `would_fire==true` blocks by `net_usd`, (4) confirms
+each with the `WethUsdcCycle` fork test at that `--fork-block-number`, (5) writes a per-run
+`report.md` with a REAL vs MIRAGE verdict, (6) appends a row to `harness/history.csv`, and (7)
+repeats on a schedule, printing a rolling summary. The REAL/MIRAGE verdict is honest: a block is
+REAL only if the real fork swaps net positive beyond gas at the smallest size AND the gross gap
+still holds as size grows; it is MIRAGE if the gap vanishes, fails to clear gas, or collapses with
+size (the B3 shallow-depth pattern). Pieces: `harness/pools.arbitrum.json` (config; RPC via
+`RPC_URL` env, never a key in the file), `harness/run_once.sh` (one cycle), `harness/watch_loop.sh`
+(continuous, nohup-safe, SIGINT-clean), and dependency-free Node helpers
+`config.mjs`/`parse_fires.mjs`/`make_report.mjs`/`write_run.mjs` whose CSV/forge-log/verdict logic
+is unit-tested in `test/harness_report.test.js` (no network). The harness is MEASUREMENT ONLY:
+read-only watcher plus fork simulation, no key custody, no transactions, no funding.
+
+Kick it off once:
+```
+export RPC_URL=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+nohup bash harness/watch_loop.sh >> harness/loop.out 2>&1 &
+```
+Config note: the Uniswap pool is PRE-FILLED but UNVERIFIED (run `--check` to confirm), the Sushi
+pool is PRE-FILLED (its quoter still needs filling), and the PancakeSwap pool/quoter are
+PLACEHOLDERS the harness refuses to run against until you supply the real Arbitrum addresses from
+DEX Screener.
+
 **Honest standing conclusion:** no capturable edge found for a buildable same-chain flash-loan bot;
 apparent gaps are artifacts or shallow-pool mirages; real profit is a sub-second latency race against
 colocated bots. Keep testing, but confirm EVERY signal with real-swap fork execution, and never fund
-anything on a quote/simulation alone.
+anything on a quote/simulation alone. The harness operationalizes exactly this discipline: it flags a
+candidate only when real fork swaps clear gas and hold as size grows, and it cannot manufacture an edge
+that is not there.

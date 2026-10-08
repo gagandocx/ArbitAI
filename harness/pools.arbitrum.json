@@ -1,0 +1,29 @@
+{
+  "_comment": "ArbitAI continuous harness pool config for Arbitrum WETH/USDC across three DEXes. RPC is supplied via the RPC_URL environment variable (NEVER put a key in this file). The harness refuses to run while any address below is still a placeholder (starts with 0xPANCAKE / 0xUNISWAP / 0xSUSHI or is empty). Preflight each address with: node sim/live_two_dex_watcher.mjs --chain arbitrum --check --poolA <uni> --poolB <pancake> --poolC <sushi>",
+  "chain": "arbitrum",
+  "rpc_env": "RPC_URL",
+  "weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+  "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+  "pools": {
+    "A": {
+      "dex": "Uniswap V3",
+      "pool": "0xC6962004f452bE9203591991D15f6b388e09E8D0",
+      "quoter": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+      "note": "UNVERIFIED candidate the user supplied. Run --check against the live chain to confirm it is the real Uniswap V3 WETH/USDC pool before trusting results. Quoter is the Uniswap QuoterV2 (default)."
+    },
+    "B": {
+      "dex": "PancakeSwap V3",
+      "pool": "0xPANCAKE_V3_WETH_USDC_ARBITRUM",
+      "quoter": "0xPANCAKE_V3_QUOTER_ARBITRUM",
+      "note": "PLACEHOLDER. You MUST replace both the pool and the quoter with the real PancakeSwap V3 WETH/USDC Arbitrum addresses (from dexscreener.com/arbitrum, search 'WETH USDC'). PancakeSwap V3 uses its OWN quoter, not the Uniswap one. The harness will refuse to run until this is filled in."
+    },
+    "C": {
+      "dex": "SushiSwap V3",
+      "pool": "0xf3eb87c1f6020982173c908e7eb31aa66c1f0296",
+      "quoter": "0xSUSHI_V3_QUOTER_ARBITRUM",
+      "note": "Pool is a known SushiSwap V3 WETH/USDC Arbitrum pool the user identified. SushiSwap V3 uses its OWN quoter; replace the quoter placeholder with Sushi's QuoterV2 on Arbitrum, or the pool will be mis-quoted through the Uniswap quoter with a WARNING."
+    }
+  },
+  "sizes": "1000,5000,20000,100000",
+  "min_profit_usd": 0.10
+}

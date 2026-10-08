@@ -14,3 +14,8 @@ arb_recon_clean.csv
 arb_recon_big.csv
 arb_recon_*.csv
 two_dex_watch.csv
+
+# continuous harness runtime artifacts (per-run results, rolling history, loop output)
+harness/results/
+harness/history.csv
+harness/loop.out
